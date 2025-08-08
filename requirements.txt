@@ -1,0 +1,21 @@
+# Django + Playwright Seek Scraper Requirements
+
+# Django framework
+Django>=4.2.0,<5.0.0
+
+# Database
+# For PostgreSQL:
+psycopg2-binary>=2.9.0
+
+# Web scraping
+playwright>=1.40.0
+
+# Utilities
+python-dateutil>=2.8.0
+
+# Development and debugging (optional)
+ipython>=8.0.0
+django-extensions>=3.2.0
+
+# Logging and monitoring (optional)
+colorlog>=6.7.0
