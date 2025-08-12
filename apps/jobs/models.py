@@ -47,6 +47,7 @@ class JobPosting(models.Model):
     ]
     
     JOB_CATEGORY_CHOICES = [
+        # Core/general
         ('technology', 'Technology'),
         ('finance', 'Finance'),
         ('healthcare', 'Healthcare'),
@@ -60,8 +61,20 @@ class JobPosting(models.Model):
         ('manufacturing', 'Manufacturing'),
         ('consulting', 'Consulting'),
         ('legal', 'Legal'),
+        # Extended to match Australian boards like Chandler Macleod
+        ('office_support', 'Office Support'),
+        ('drivers_operators', 'Drivers & Operators'),
+        ('technical_engineering', 'Technical & Engineering'),
+        ('production_workers', 'Production Workers'),
+        ('transport_logistics', 'Transport & Logistics'),
+        ('mining_resources', 'Mining & Resources'),
+        ('sales_marketing', 'Sales & Marketing'),
+        ('executive', 'Executive'),
         ('other', 'Other'),
     ]
+
+    # Allow runtime extension of choices for new categories encountered during scraping
+    # Admin/forms will render newly appended choices without migrations
     
     # Basic Information
     title = models.CharField(max_length=200)
