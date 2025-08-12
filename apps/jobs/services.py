@@ -88,6 +88,31 @@ class JobCategorizationService:
             'counsel', 'litigation', 'corporate law', 'compliance', 'contracts',
             'intellectual property', 'patent', 'trademark', 'legal advisor',
             'barrister', 'solicitor', 'judicial', 'court'
+        ],
+        # Extended mappings aligned to Chandler Macleod categories
+        'office_support': [
+            'office support', 'reception', 'administrator', 'admin', 'clerical', 'secretary', 'pa', 'ea', 'data entry'
+        ],
+        'drivers_operators': [
+            'driver', 'drivers', 'operator', 'forklift', 'excavator', 'dump truck', 'multi skilled', 'crew trainer', 'plant operator'
+        ],
+        'technical_engineering': [
+            'engineer', 'engineering', 'technician', 'mechanical', 'electrical', 'civil', 'draft', 'maintenance', 'reliability', 'asset', 'analyst', 'cost analyst'
+        ],
+        'production_workers': [
+            'production worker', 'production', 'labour', 'laborer', 'warehouse operator', 'mining operators', 'operators', 'process worker'
+        ],
+        'transport_logistics': [
+            'transport', 'logistics', 'fleet', 'freight', 'warehouse', 'supply chain', 'distribution'
+        ],
+        'mining_resources': [
+            'mining', 'resources', 'rio tinto', 'fifo', 'dido', 'bibo', 'mine', 'pit', 'haul truck', 'cat 789', 'excavators', 'dozer'
+        ],
+        'sales_marketing': [
+            'sales', 'marketing', 'customer support', 'customer service', 'account manager', 'representative'
+        ],
+        'executive': [
+            'executive', 'director', 'head of', 'chief', 'c-suite', 'general manager'
         ]
     }
     
@@ -130,6 +155,16 @@ class JobCategorizationService:
                 return best_category
         
         return 'other'
+
+    @classmethod
+    def normalize_display_category(cls, raw_text: str) -> str:
+        """Return a pretty display label for a raw category string."""
+        if not raw_text:
+            return 'Other'
+        text = raw_text.strip()
+        # Title-case but keep ampersands
+        text = re.sub(r'\s+', ' ', text.replace('&amp;', '&'))
+        return text.title()
     
     @classmethod
     def get_job_keywords(cls, title: str, description: str = "") -> list:
