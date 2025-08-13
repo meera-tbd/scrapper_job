@@ -20,6 +20,7 @@ class JobPosting(models.Model):
         ('casual', 'Casual'),
         ('contract', 'Contract'),
         ('temporary', 'Temporary'),
+        ('permanent', 'Permanent'),
         ('internship', 'Internship'),
         ('freelance', 'Freelance'),
     ]
