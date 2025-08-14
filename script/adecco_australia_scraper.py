@@ -182,7 +182,7 @@ class AdeccoAustraliaJobScraper:
         Extract salary information from Adecco salary format.
         
         Args:
-            salary_text (str): Raw salary text like "$31 - $45 / Hour"
+            salary_text (str): Raw salary text like "$ 90000 - $ 100000 / Year"
             
         Returns:
             dict: Salary information with min, max, type, currency
@@ -193,14 +193,14 @@ class AdeccoAustraliaJobScraper:
         salary_info = {
             'raw_text': salary_text,
             'currency': 'AUD',
-            'type': 'hourly'  # Default for Adecco hourly rates
+            'type': 'yearly'  # Default for Adecco
         }
         
         try:
             text_lower = salary_text.lower()
-            # Handle hourly rates: "$31 - $45 / Hour"
+            
+            # Handle hourly rates: "$ 59 - $ 60 / Hour"
             if '/ hour' in text_lower or '/hr' in text_lower or 'per hour' in text_lower:
-                # Extract numbers from range
                 numbers = re.findall(r'[\d,]+', salary_text)
                 if len(numbers) >= 2:
                     min_salary = int(numbers[0].replace(',', ''))
@@ -214,8 +214,8 @@ class AdeccoAustraliaJobScraper:
                     salary_info['max'] = salary
                     salary_info['type'] = 'hourly'
             
-            # Handle annual salaries: "$100000 - $120000 / Year" format
-            elif '/ year' in text_lower or 'per year' in text_lower:
+            # Handle annual salaries: "$ 90000 - $ 100000 / Year"
+            elif '/ year' in text_lower or 'per year' in text_lower or 'year' in text_lower:
                 numbers = re.findall(r'[\d,]+', salary_text)
                 if len(numbers) >= 2:
                     min_salary = int(numbers[0].replace(',', ''))
@@ -229,8 +229,8 @@ class AdeccoAustraliaJobScraper:
                     salary_info['max'] = salary
                     salary_info['type'] = 'yearly'
             
-            # Handle annual salaries: "$80K-$90K + Super + Bonuses"
-            elif 'k' in text_lower and ('super' in text_lower or 'bonus' in text_lower):
+            # Handle K format: "$80K-$90K"
+            elif 'k' in text_lower:
                 numbers = re.findall(r'(\d+)k', salary_text.lower())
                 if len(numbers) >= 2:
                     min_salary = int(numbers[0]) * 1000
@@ -244,22 +244,7 @@ class AdeccoAustraliaJobScraper:
                     salary_info['max'] = salary
                     salary_info['type'] = 'yearly'
             
-            # Handle explicit "/ Year" style
-            elif '/ year' in text_lower or 'per annum' in text_lower or '/ yr' in text_lower:
-                numbers = re.findall(r'[\d,]+', salary_text)
-                if len(numbers) >= 2:
-                    min_salary = int(numbers[0].replace(',', ''))
-                    max_salary = int(numbers[1].replace(',', ''))
-                    salary_info['min'] = min_salary
-                    salary_info['max'] = max_salary
-                    salary_info['type'] = 'yearly'
-                elif len(numbers) == 1:
-                    salary = int(numbers[0].replace(',', ''))
-                    salary_info['min'] = salary
-                    salary_info['max'] = salary
-                    salary_info['type'] = 'yearly'
-            
-            # Handle other formats
+            # Handle other formats - just extract numbers
             else:
                 numbers = re.findall(r'[\d,]+', salary_text)
                 if numbers:
@@ -270,7 +255,7 @@ class AdeccoAustraliaJobScraper:
                     else:
                         salary_info['min'] = salary_info['max'] = nums[0]
                     
-                    # Try to determine type from context
+                    # Determine type from context
                     if any(word in salary_text.lower() for word in ['hour', 'hr', 'per hour']):
                         salary_info['type'] = 'hourly'
                     elif any(word in salary_text.lower() for word in ['year', 'annual', 'pa']):
@@ -447,11 +432,47 @@ class AdeccoAustraliaJobScraper:
                     job_data['employment_type'] = line
                     break
             
-            # Extract salary information
-            for line in lines:
-                if '$' in line and any(unit in line.lower() for unit in ['hour', 'hr', 'k', 'super', 'bonus']):
-                    job_data['salary_text'] = line
-                    break
+            # Extract salary directly from job card using the exact structure you provided
+            # Structure: card-body > 4 <p> elements > <div class="text-salary"> (5th element)
+            try:
+                # Method 1: Look for salary within this specific job card
+                salary_div = job_element.query_selector('div.text-salary.salary-divider')
+                if salary_div:
+                    salary_text = (salary_div.inner_text() or '').strip()
+                    if salary_text and '$' in salary_text:
+                        job_data['salary_text'] = salary_text
+                        logger.info(f"Extracted salary from job card: {salary_text}")
+                
+                # Method 2: Alternative selector for salary div
+                if not job_data.get('salary_text'):
+                    salary_div = job_element.query_selector('.text-salary, [class*="salary-divider"]')
+                    if salary_div:
+                        salary_text = (salary_div.inner_text() or '').strip()
+                        if salary_text and '$' in salary_text:
+                            job_data['salary_text'] = salary_text
+                            logger.info(f"Extracted salary using fallback selector: {salary_text}")
+                
+                # Method 3: Parse the card structure directly (5th element after 4 <p> tags)
+                if not job_data.get('salary_text'):
+                    # Get card body
+                    card_body = job_element.query_selector('.card-body')
+                    if card_body:
+                        # Get all child elements
+                        children = card_body.query_selector_all('p, div')
+                        # The salary should be around the 5th element (index 4)
+                        for i, child in enumerate(children):
+                            child_text = (child.inner_text() or '').strip()
+                            if '$' in child_text and any(unit in child_text.lower() for unit in ['hour', 'year', 'week']):
+                                job_data['salary_text'] = child_text
+                                logger.info(f"Extracted salary from card structure (element {i}): {child_text}")
+                                break
+                
+            except Exception as e:
+                logger.debug(f"Error extracting salary from job card: {e}")
+                
+            # Fallback to empty if still no salary found
+            if not job_data.get('salary_text'):
+                job_data['salary_text'] = ''
             
             # Extract location (case-insensitive, support full names and abbreviations)
             state_terms = ['queensland', 'new south wales', 'victoria', 'western australia', 'south australia', 'tasmania', 'northern territory',
@@ -665,7 +686,11 @@ class AdeccoAustraliaJobScraper:
                             logger.info(f"Extracted location from pattern match: {extracted_data['location']}")
                             break
             
-            # === 3. SALARY EXTRACTION (Based on Adecco HTML Structure) ===
+            # === 3. SALARY EXTRACTION FROM JOB DETAIL PAGE ===
+            # Extract salary using the exact HTML structure you provided
+            salary_found = False
+            
+            # === 3. SALARY EXTRACTION FROM JOB DETAIL PAGE ===
             # Look for salary in specific Adecco elements: <div class="text-salary salary-divider text-01 roundness_1">$ 75000 - $ 90000 / Year</div>
             salary_selectors = [
                 '.text-salary',  # Main salary class in Adecco: <div class="text-salary salary-divider text-01 roundness_1">
@@ -691,32 +716,24 @@ class AdeccoAustraliaJobScraper:
                 except Exception:
                     continue
             
-            # Fallback to pattern matching if selector method fails
-            if not extracted_data['salary_text']:
+            # Method 3: Pattern matching in page content as final fallback
+            if not salary_found:
                 salary_patterns = [
-                    # High-precision patterns for individual job pages
-                    r'\$\s*([\d,]+)\s*-\s*\$\s*([\d,]+)\s*/\s*Year',  # "$100000 - $120000 / Year"
-                    r'\$\s*([\d,]+)\s*-\s*\$\s*([\d,]+)\s*/\s*Hour',  # "$68 - $78 / Hour"  
-                    r'\$\s*([\d,]+)\s*/\s*Year',  # "$120000 / Year"
-                    r'\$\s*([\d,]+)\s*/\s*Hour',  # "$45 / Hour"
-                    r'\$\s*(\d+)[kK]\s*-\s*\$\s*(\d+)[kK]',  # "$80K - $90K"
-                    r'\$\s*(\d+)[kK]'  # "$80K"
+                    r'\$\s*[\d,]+\s*-\s*\$\s*[\d,]+\s*/\s*Year',  # "$ 90000 - $ 100000 / Year"
+                    r'\$\s*[\d,]+\s*-\s*\$\s*[\d,]+\s*/\s*Hour',  # "$ 59 - $ 60 / Hour"
+                    r'\$\s*[\d,]+\s*/\s*Year',  # "$ 120000 / Year"
+                    r'\$\s*[\d,]+\s*/\s*Hour',  # "$ 45 / Hour"
+                    r'\$\s*\d+[kK]\s*-\s*\$\s*\d+[kK]',  # "$80K - $90K"
                 ]
                 
                 for pattern in salary_patterns:
                     salary_match = re.search(pattern, page_content, re.IGNORECASE)
                     if salary_match:
-                        # Find the full line containing this salary for better context
-                        for line in page_content.split('\n'):
-                            if salary_match.group(0) in line:
-                                # Validate it's a real salary line, not just random numbers
-                                if (any(unit in line.lower() for unit in ['year', 'hour', 'per', 'salary', 'k']) and
-                                    not any(invalid in line.lower() for invalid in ['search', 'apply', 'navigation', 'menu'])):
-                                    extracted_data['salary_text'] = line.strip()
-                                    logger.info(f"Extracted salary from pattern match: {extracted_data['salary_text']}")
-                                    break
-                        if extracted_data['salary_text']:
-                            break
+                        extracted_data['salary_text'] = salary_match.group(0)
+                        logger.info(f"Extracted salary from pattern: {salary_match.group(0)}")
+                        break
+            
+
             
             # === 4. EMPLOYMENT TYPE EXTRACTION (Based on Adecco HTML Structure) ===
             # Look for work-related icons: <span class="material-icons-outlined">work_outline</span><span>Permanent</span>
@@ -1016,32 +1033,8 @@ class AdeccoAustraliaJobScraper:
             except Exception:
                 panel_text = ''
 
-            # Salary: Enhanced to handle multiple Adecco salary formats
-            lines = [l.strip() for l in panel_text.split('\n') if l.strip()]
-            for line in lines[:25]:
-                # Pattern 1: "$68 - $78 / Hour" or "$68-$78/Hour"
-                if re.search(r'\$[\d,]+\s*-\s*\$[\d,]+\s*/?\s*(Hour|Year|Month|Week)', line, re.I):
-                    job_data['salary_text'] = line
-                    break
-                # Pattern 2: "$80K-$90K + Super + Bonuses"
-                elif re.search(r'\$\d+[kK]\s*-\s*\$\d+[kK]', line):
-                    job_data['salary_text'] = line
-                    break
-                # Pattern 3: "$31 - $45 / Hour" (spaces around dash)
-                elif re.search(r'\$\d+\s+-\s+\$\d+\s+/\s+Hour', line, re.I):
-                    job_data['salary_text'] = line
-                    break
-                # Pattern 4: Single value with unit "$45 / Hour"
-                elif re.search(r'\$\d+\s*/\s*(Hour|Year)', line, re.I):
-                    job_data['salary_text'] = line
-                    break
-            
-            # Fallback: Look for any line with salary indicators if nothing found
-            if not job_data['salary_text']:
-                for line in lines[:30]:
-                    if '$' in line and any(unit in line.lower() for unit in ['hour', 'hr', 'k', 'per hour', 'salary', 'super', 'bonus', 'annum']):
-                        job_data['salary_text'] = line
-                        break
+            # Skip salary extraction from panel - will get it from individual job page only
+            job_data['salary_text'] = ''
 
             # Location - Enhanced pattern to capture more variations
             # First try: Full state names and common city patterns
@@ -1222,11 +1215,11 @@ class AdeccoAustraliaJobScraper:
         """Return a list of elements that are likely left-column job cards only.
         We filter candidates by position (x coordinate) to avoid the right detail panel."""
         candidates_selectors = [
-            'div:has-text("$")',
             'div:has-text("Permanent")',
             'div:has-text("Temporary")',
             'div:has-text("Casual")',
             'div:has-text("Full Time")',
+            'div:has-text("Part Time")',
             'div:has-text(", ")'
         ]
         elements = []
@@ -1407,7 +1400,7 @@ class AdeccoAustraliaJobScraper:
                         salary_min=salary_info.get('min'),
                         salary_max=salary_info.get('max'),
                         salary_currency=salary_info.get('currency', 'AUD'),
-                        salary_type=salary_info.get('type', 'hourly'),
+                        salary_type=salary_info.get('type', 'yearly'),
                         salary_raw_text=salary_info.get('raw_text', ''),
                         external_source='adecco.com.au',
                         external_url=external_url,
@@ -1501,13 +1494,14 @@ class AdeccoAustraliaJobScraper:
                     
                     # Find job elements - look for job listing containers
                     job_selectors = [
-                        'div:has-text("$"):has-text("Hour"):has-text(",")',  # Jobs with salary and location
                         'div:has-text("Temporary"):has-text(",")',           # Jobs with employment type
                         'div:has-text("Permanent"):has-text(",")',           # Jobs with employment type
                         'div:has-text("Casual"):has-text(",")',              # Jobs with employment type
-                        'div:has-text("Queensland"):has-text("$")',          # Jobs with location and salary
-                        'div:has-text("NSW"):has-text("$")',                 # Jobs with location and salary
-                        'div:has-text("Victoria"):has-text("$")',            # Jobs with location and salary
+                        'div:has-text("Queensland")',                        # Jobs with location
+                        'div:has-text("NSW")',                               # Jobs with location  
+                        'div:has-text("Victoria")',                          # Jobs with location
+                        'div:has-text("Full Time")',                         # Jobs with work type
+                        'div:has-text("Part Time")',                         # Jobs with work type
                     ]
                     
                     # Prefer left-column card detection to avoid selecting the right panel
@@ -1578,6 +1572,9 @@ class AdeccoAustraliaJobScraper:
                         # Get full job description if URL is available
                         if job_data.get('job_url'):
                             try:
+                                # Save the salary we extracted from the job card
+                                card_salary = job_data.get('salary_text', '')
+                                
                                 details = self._get_full_job_description(
                                     page, job_data['job_url'], job_data.get('title', '')
                                 )
@@ -1585,6 +1582,11 @@ class AdeccoAustraliaJobScraper:
                                 for k in ['title', 'description', 'location', 'salary_text', 'employment_type', 'work_type']:
                                     if details.get(k):
                                         job_data[k] = details[k]
+                                
+                                # Restore the salary from job card if we had one (more reliable than detail page)
+                                if card_salary:
+                                    job_data['salary_text'] = card_salary
+                                
                             except Exception as e:
                                 logger.error(f"Failed to get description for {job_data['title']}: {e}")
                         
