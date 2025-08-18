@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse, parse_qs
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+from django.utils import timezone
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -315,22 +316,102 @@ class JoraJobScraper:
             self.logger.error(f"Error extracting job data: {e}")
             return None
     
+    def extract_full_job_description(self, page, job_url):
+        """Visit individual job page to extract full description."""
+        try:
+            if not job_url:
+                return ""
+            
+            self.logger.info(f"Fetching full description from: {job_url[:100]}...")
+            
+            # Navigate to the individual job page
+            page.goto(job_url, wait_until='domcontentloaded', timeout=30000)
+            self.human_delay(2, 4)
+            
+            # Target the specific job description container for Jora
+            description_selectors = [
+                '#job-description-container',           # Primary target - Jora's specific job description container
+                '.job-description',                     # Fallback - Main job description
+                '.description',                         # Fallback - Description class
+                '.job-content',                         # Fallback - Job content
+                '[data-testid="job-description"]',      # Fallback - Test ID description
+                '.job-posting-description',             # Fallback - Job posting description
+            ]
+            
+            full_description = ""
+            
+            # Try each selector to find the job description
+            for selector in description_selectors:
+                try:
+                    description_element = page.query_selector(selector)
+                    if description_element:
+                        text = description_element.inner_text().strip()
+                        if text and len(text) > 50:  # Ensure we get substantial content
+                            full_description = text
+                            if selector == '#job-description-container':
+                                self.logger.info(f"Found SPECIFIC job-description-container ({len(text)} chars)")
+                            else:
+                                self.logger.info(f"Found description using fallback selector: {selector} ({len(text)} chars)")
+                            break
+                except Exception as e:
+                    continue
+            
+            # If no specific selector worked, try to get all text content from main areas
+            if not full_description:
+                try:
+                    # Get text from main content areas
+                    main_content = page.query_selector('main, .main, #main, .container, .wrapper')
+                    if main_content:
+                        full_description = main_content.inner_text().strip()
+                        self.logger.info(f"Extracted description from main content area ({len(full_description)} chars)")
+                except Exception as e:
+                    pass
+            
+            # Final fallback - get all visible text and filter for job-related content
+            if not full_description:
+                try:
+                    all_text = page.inner_text('body')
+                    # Basic filtering to get job-related content
+                    lines = all_text.split('\n')
+                    job_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        # Skip navigation, footer, and other non-job content
+                        if line and len(line) > 20 and not any(skip_word in line.lower() for skip_word in 
+                            ['cookie', 'privacy', 'terms', 'navigation', 'menu', 'footer', 'header', 
+                             'subscribe', 'newsletter', 'social', 'follow us', 'contact us']):
+                            job_lines.append(line)
+                    
+                    if job_lines:
+                        full_description = '\n'.join(job_lines[:50])  # Take first 50 relevant lines
+                        self.logger.info(f"Extracted filtered description ({len(full_description)} chars)")
+                except Exception as e:
+                    pass
+            
+            return full_description
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting full job description from {job_url}: {e}")
+            return ""
+    
     def parse_relative_date(self, date_text):
-        """Parse relative date strings like 'Posted 3 days ago' into actual dates."""
+        """Parse relative date strings like 'Posted 3 days ago' into timezone-aware dates."""
         try:
             if not date_text:
-                return datetime.now().date()
+                return timezone.now()
             
             date_text = date_text.lower()
-            today = datetime.now().date()
+            now = timezone.now()
+            today = now.date()
             
             # Handle "today" or "just posted"
             if 'today' in date_text or 'just posted' in date_text:
-                return today
+                return now.replace(hour=9, minute=0, second=0, microsecond=0)  # Assume 9 AM posting
             
             # Handle "yesterday"
             if 'yesterday' in date_text:
-                return today - timedelta(days=1)
+                yesterday = now - timedelta(days=1)
+                return yesterday.replace(hour=9, minute=0, second=0, microsecond=0)
             
             # Extract number from "X days ago", "X hours ago", etc.
             numbers = re.findall(r'\d+', date_text)
@@ -338,19 +419,22 @@ class JoraJobScraper:
                 number = int(numbers[0])
                 
                 if 'hour' in date_text:
-                    return today  # Same day for hours
+                    return now - timedelta(hours=number)
                 elif 'day' in date_text:
-                    return today - timedelta(days=number)
+                    past_date = now - timedelta(days=number)
+                    return past_date.replace(hour=9, minute=0, second=0, microsecond=0)
                 elif 'week' in date_text:
-                    return today - timedelta(weeks=number)
+                    past_date = now - timedelta(weeks=number)
+                    return past_date.replace(hour=9, minute=0, second=0, microsecond=0)
                 elif 'month' in date_text:
-                    return today - timedelta(days=number * 30)
+                    past_date = now - timedelta(days=number * 30)
+                    return past_date.replace(hour=9, minute=0, second=0, microsecond=0)
             
-            return today
+            return now.replace(hour=9, minute=0, second=0, microsecond=0)
             
         except Exception as e:
             self.logger.warning(f"Error parsing date '{date_text}': {e}")
-            return datetime.now().date()
+            return timezone.now()
     
     def parse_location(self, location_string):
         """Parse location string into city, state, country."""
@@ -496,9 +580,9 @@ class JoraJobScraper:
                     location_obj, created = Location.objects.get_or_create(
                         name=location_name,
                         defaults={
-                            'city': city,
-                            'state': state,
-                            'country': country
+                            'city': city if city else '',
+                            'state': state if state else '',
+                            'country': country if country else 'Australia'
                         }
                     )
                 
@@ -506,7 +590,7 @@ class JoraJobScraper:
                 company_obj, created = Company.objects.get_or_create(
                     name=company_name,
                     defaults={
-                        'slug': re.sub(r'[^a-zA-Z0-9\-_]', '-', company_name.lower())[:50]
+                        'slug': re.sub(r'[^a-zA-Z0-9\-_]', '-', company_name.lower())
                     }
                 )
                 
@@ -562,24 +646,24 @@ class JoraJobScraper:
                     }
                 )
                 
-                # Create job posting
+                # Create job posting - full description preserved, only specific fields truncated for DB constraints
                 job_posting = JobPosting.objects.create(
-                    title=job_title,
+                    title=job_title[:200] if len(job_title) > 200 else job_title,  # CharField(200) - smart truncation
                     company=company_obj,
                     location=location_obj,
                     posted_by=scraper_user,
-                    description=job_data.get('summary', ''),
-                    external_url=job_url,
-                    external_source='jora_au',
-                    job_category=category,
-                    job_type=job_type,
-                    work_mode=work_mode,
+                    description=job_data.get('full_description', job_data.get('summary', '')),  # TextField - full description preserved!
+                    external_url=job_url[:200] if len(job_url) > 200 else job_url,  # URLField(200) - smart truncation
+                    external_source='jora_au',  # This is short, no truncation needed
+                    job_category=category if category else 'other',
+                    job_type=job_type if job_type else 'full_time',
+                    work_mode=work_mode if work_mode else '',
                     salary_min=min_salary,
                     salary_max=max_salary,
-                    salary_currency=currency,
-                    salary_type=period,
-                    salary_raw_text=salary_display,
-                    posted_ago=job_data.get('posted_ago', ''),
+                    salary_currency=currency if currency else 'AUD',
+                    salary_type=period if period else 'yearly',
+                    salary_raw_text=salary_display[:200] if salary_display and len(salary_display) > 200 else (salary_display or ''),
+                    posted_ago=job_data.get('posted_ago', '')[:50] if len(job_data.get('posted_ago', '')) > 50 else job_data.get('posted_ago', ''),
                     date_posted=job_data.get('date_posted'),
                     status='active'
                 )
@@ -604,6 +688,12 @@ class JoraJobScraper:
                 
         except Exception as e:
             self.logger.error(f"Error saving job to database: {e}")
+            self.logger.error(f"Job data: title='{job_title[:100]}...'")
+            self.logger.error(f"  company='{company_name[:100]}...'")
+            self.logger.error(f"  url='{job_url[:100]}...'")
+            if job_data.get('full_description'):
+                self.logger.error(f"  description length: {len(job_data.get('full_description', ''))} characters")
+            
             self.error_count += 1
             return False
     
@@ -649,7 +739,7 @@ class JoraJobScraper:
                     potential_cards = page.query_selector_all(selector)
                     if potential_cards and len(potential_cards) > 2:  # Need at least 3 for valid results
                         job_cards = potential_cards
-                        self.logger.info(f"✅ Found {len(job_cards)} job cards using selector: {selector}")
+                        self.logger.info(f"Found {len(job_cards)} job cards using selector: {selector}")
                         break
                 except:
                     continue
@@ -661,7 +751,7 @@ class JoraJobScraper:
                     job_links = page.query_selector_all('h3 a, .job-title a, a[href*="/job/"]')
                     if job_links and len(job_links) > 2:
                         job_cards = job_links
-                        self.logger.info(f"✅ Using job title links as fallback: found {len(job_cards)}")
+                        self.logger.info(f"Using job title links as fallback: found {len(job_cards)}")
                 except:
                     pass
             
@@ -678,13 +768,29 @@ class JoraJobScraper:
                     job_data = self.extract_job_data(job_card)
                     
                     if job_data and job_data.get('job_title') and job_data.get('job_url'):
+                        # Extract full job description from individual job page using new context
+                        try:
+                            # Create new page context for job detail to avoid context conflicts
+                            context = page.context
+                            detail_page = context.new_page()
+                            
+                            full_description = self.extract_full_job_description(detail_page, job_data['job_url'])
+                            job_data['full_description'] = full_description
+                            self.logger.info(f"Extracted description: {len(full_description)} characters")
+                            
+                            # Close the detail page to free resources
+                            detail_page.close()
+                        except Exception as e:
+                            self.logger.error(f"Failed to extract full description: {e}")
+                            job_data['full_description'] = job_data.get('summary', '')
+                        
                         # Save to database
                         if self.save_job_to_database(job_data):
                             self.jobs_scraped += 1
                             jobs_found += 1
                         
                         # Add delay between job processing
-                        self.human_delay(0.5, 1.5)
+                        self.human_delay(1, 3)  # Increased delay due to additional page visits
                     
                 except Exception as e:
                     self.logger.error(f"Error processing job card {i}: {e}")

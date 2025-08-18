@@ -105,7 +105,7 @@ class WorkforceAustraliaJobScraper:
         # Remove common unwanted prefixes and headers
         unwanted_prefixes = [
             'Job description',
-            'Job Description',
+            'Job Description', 
             'JOB DESCRIPTION',
             'Description:',
             'DESCRIPTION:',
@@ -124,8 +124,17 @@ class WorkforceAustraliaJobScraper:
             'SUMMARY:'
         ]
         
-        # Remove unwanted prefixes
+        # Remove unwanted prefixes and HTML artifacts
         cleaned_text = description_text.strip()
+        
+        # Remove leading numbers followed by "Job description" pattern (like "0Job description")
+        import re
+        cleaned_text = re.sub(r'^\d+\s*Job description\s*', '', cleaned_text, flags=re.IGNORECASE)
+        cleaned_text = re.sub(r'^\d+\s*Description\s*', '', cleaned_text, flags=re.IGNORECASE)
+        cleaned_text = re.sub(r'^\d+\s*Role description\s*', '', cleaned_text, flags=re.IGNORECASE)
+        cleaned_text = re.sub(r'^\d+\s*Position description\s*', '', cleaned_text, flags=re.IGNORECASE)
+        
+        # Remove other unwanted prefixes
         for prefix in unwanted_prefixes:
             if cleaned_text.startswith(prefix):
                 cleaned_text = cleaned_text[len(prefix):].strip()
@@ -134,8 +143,33 @@ class WorkforceAustraliaJobScraper:
                     cleaned_text = cleaned_text[1:].strip()
                 break
         
-        # Remove extra whitespace and normalize line breaks
-        lines = [line.strip() for line in cleaned_text.split('\n') if line.strip()]
+        # Remove leading single digits or numbers that appear at start (HTML artifacts)
+        cleaned_text = re.sub(r'^\d+\s*', '', cleaned_text).strip()
+        
+        # Remove HTML-like artifacts and unwanted text patterns
+        unwanted_patterns = [
+            r'^\s*0\s*',  # Leading zero
+            r'^\s*\d+\s*$',  # Just a number on its own line
+            r'aria-hidden="true".*?(?=\w)',  # aria-hidden attributes
+            r'class="[^"]*"',  # class attributes
+            r'span.*?(?=\w)',  # span tags
+            r'mint-blurb.*?(?=\w)',  # mint-blurb artifacts
+            r'card-title.*?(?=\w)',  # card-title artifacts
+            r'card-title-wrapper.*?(?=\w)',  # card-title-wrapper artifacts
+            r'h2.*?(?=\w)',  # h2 tag artifacts
+            r'compact.*?(?=\w)',  # compact class artifacts
+        ]
+        
+        for pattern in unwanted_patterns:
+            cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Remove extra whitespace but preserve list formatting and structure
+        lines = []
+        for line in cleaned_text.split('\n'):
+            line = line.strip()
+            if line:
+                lines.append(line)
+        
         cleaned_text = '\n'.join(lines)
         
         # Remove leading and trailing whitespace
@@ -194,8 +228,11 @@ class WorkforceAustraliaJobScraper:
             
             # Try multiple selectors to find the job description
             description_selectors = [
+                '.card-inner',  # Primary selector based on your HTML structure
+                '.card-copy',   # Secondary selector
+                '.card-inner .card-copy',  # More specific path
                 '.job-description',
-                '.job-details',
+                '.job-details', 
                 '.description',
                 '.vacancy-description',
                 '.role-description',
@@ -224,12 +261,13 @@ class WorkforceAustraliaJobScraper:
                 try:
                     description_element = page.query_selector(selector)
                     if description_element:
+                        # Get the full content from card-inner, preserving all formatting
                         desc_text = description_element.inner_text().strip()
                         
                         # Clean up the description text
                         desc_text = self.clean_job_description(desc_text)
                         
-                        if len(desc_text) > 50:  # Must be substantial content after cleaning
+                        if desc_text:  # Accept any description content
                             full_description = desc_text
                             self.logger.debug(f"Found full description using selector: {selector}")
                             break
@@ -273,8 +311,8 @@ class WorkforceAustraliaJobScraper:
                             ]):
                                 break
                             
-                            # Collect substantial lines while we're collecting
-                            if collecting and len(line) > 20:
+                            # Collect any lines while we're collecting
+                            if collecting and line:
                                 description_lines.append(line)
                         
                         if description_lines:
@@ -284,11 +322,11 @@ class WorkforceAustraliaJobScraper:
                         
                         # If still no description, try to get the main content area
                         if not full_description:
-                            # Look for substantial content blocks
+                            # Look for content blocks
                             content_blocks = []
                             for line in lines:
                                 line = line.strip()
-                                if (len(line) > 100 and  # Substantial content
+                                if (line and  # Any content
                                     not any(skip in line.lower() for skip in [
                                         'skip to', 'navigation', 'search', 'apply now',
                                         'footer', 'header', 'menu', 'button'
@@ -364,8 +402,8 @@ class WorkforceAustraliaJobScraper:
                         company_text = company_text.replace('\n', ' ').replace('\t', ' ')
                         company_text = ' '.join(company_text.split())  # Remove extra spaces
                         
-                        # Strict validation for real company names
-                        if (len(company_text) > 3 and len(company_text) < 150 and
+                        # Validation for real company names
+                        if (company_text and
                             # Exclude UI elements and navigation
                             not any(skip_word in company_text.lower() for skip_word in [
                                 'apply', 'search', 'home', 'jobs', 'save', 'share',
@@ -416,8 +454,8 @@ class WorkforceAustraliaJobScraper:
                         if any(skip in line.lower() for skip in ['skip to main', 'planned outage', 'myid are making', 'find out how', 'homechevron_right']):
                             continue
                             
-                        # If this line contains job title-like text and isn't too short/long
-                        if (len(line) > 5 and len(line) < 200 and 
+                        # If this line contains job title-like text
+                        if (line and 
                             not any(skip in line.lower() for skip in ['apply', 'star_border', 'close', 'navigation'])):
                             
                             # Check if next line could be a company name
@@ -425,7 +463,7 @@ class WorkforceAustraliaJobScraper:
                                 potential_company = clean_lines[i + 1].strip()
                                 
                                 # Validate potential company name
-                                if (len(potential_company) > 3 and len(potential_company) < 150 and
+                                if (potential_company and
                                     # Must contain actual letters
                                     any(c.isalpha() for c in potential_company) and
                                     # Exclude UI elements and common non-company text
@@ -457,7 +495,7 @@ class WorkforceAustraliaJobScraper:
             
             # Return both description and company information
             result = {
-                'description': full_description if len(full_description) > 50 else None,
+                'description': full_description if full_description else None,
                 'company_name': company_name if company_name else None
             }
             
@@ -495,7 +533,7 @@ class WorkforceAustraliaJobScraper:
                         if parent:
                             # Check if this parent contains job-related information
                             parent_text = parent.inner_text()
-                            if len(parent_text) > 100 and any(word in parent_text.lower() for word in ['salary', 'location', 'permanent', 'full-time', 'apply']):
+                            if parent_text and any(word in parent_text.lower() for word in ['salary', 'location', 'permanent', 'full-time', 'apply']):
                                 job_card = parent  # This parent likely contains the full job card
                                 self.logger.debug(f"Found job card container at level {level+1}")
                                 break
@@ -576,7 +614,7 @@ class WorkforceAustraliaJobScraper:
                 if location_element and location_element.inner_text().strip():
                     location_text = location_element.inner_text().strip()
                     # Clean up location text
-                    if len(location_text) < 100:  # Reasonable location length
+                    if location_text:  # Accept any location text
                         job_data['location_text'] = location_text
                         break
             
@@ -594,7 +632,7 @@ class WorkforceAustraliaJobScraper:
                         line = line.strip()
                         # Check if line contains Australian location patterns
                         if any(state in line for state in aus_states) or any(city in line for city in aus_cities):
-                            if len(line) < 100:  # Reasonable location length
+                            if line:  # Accept any location line
                                 job_data['location_text'] = line
                                 break
                 except:
@@ -620,7 +658,7 @@ class WorkforceAustraliaJobScraper:
                     summary_text = summary_element.inner_text().strip()
                     # Clean up the summary text
                     summary_text = self.clean_job_description(summary_text)
-                    if len(summary_text) > 20:  # Ensure it's a reasonable description
+                    if summary_text:  # Accept any summary text
                         job_data['summary'] = summary_text
                         break
             
@@ -634,7 +672,7 @@ class WorkforceAustraliaJobScraper:
                     for i, line in enumerate(lines):
                         line = line.strip()
                         # Skip numbers, single words, titles, locations, etc.
-                        if (len(line) > 50 and  # Must be substantial text
+                        if (line and  # Accept any text
                             not line.isdigit() and  # Not just a number
                             not any(word in line.lower() for word in ['apply', 'added a month ago', 'permanent', 'award']) and
                             line != job_data.get('job_title', '') and  # Not the job title
@@ -699,7 +737,7 @@ class WorkforceAustraliaJobScraper:
                                 line,
                                 re.IGNORECASE
                             )
-                            if salary_patterns and len(line) < 200:  # Avoid taking too much text
+                            if salary_patterns:  # Accept any salary pattern
                                 job_data['salary_text'] = salary_patterns[0]
                                 break
                 except:
@@ -812,13 +850,13 @@ class WorkforceAustraliaJobScraper:
                 # Try to get any text from the element as title
                 try:
                     element_text = job_card.inner_text().strip()
-                    if element_text and len(element_text) > 5:
+                    if element_text:
                         # Take first line or first reasonable chunk as title
                         title_candidate = element_text.split('\n')[0].strip()
-                        if len(title_candidate) > 5 and len(title_candidate) < 200:
+                        if title_candidate:
                             job_data['job_title'] = title_candidate
                         else:
-                            job_data['job_title'] = element_text[:100] + "..." if len(element_text) > 100 else element_text
+                            job_data['job_title'] = element_text
                 except:
                     pass
             
@@ -836,7 +874,7 @@ class WorkforceAustraliaJobScraper:
                         summary = ' '.join(words[1:]).strip()
                     else:
                         break
-                job_data['summary'] = summary if len(summary) > 20 else job_data['summary']
+                job_data['summary'] = summary if summary else job_data['summary']
             
             # Company name will be extracted from job details page only
             # No static defaults - only use real extracted data
@@ -1380,7 +1418,7 @@ class WorkforceAustraliaJobScraper:
                         for element in all_elements[:50]:  # Check first 50 elements
                             try:
                                 element_text = element.inner_text()
-                                if len(element_text) > 50 and any(word in element_text.lower() for word in ['apply', 'salary', 'full-time', 'part-time']):
+                                if element_text and any(word in element_text.lower() for word in ['apply', 'salary', 'full-time', 'part-time']):
                                     potential_job_elements.append(element)
                             except:
                                 continue
@@ -1420,7 +1458,7 @@ class WorkforceAustraliaJobScraper:
                                     job_details = self.extract_full_job_description(job_data['job_url'], detail_page)
                                     
                                     # Extract description from job details
-                                    if job_details and job_details.get('description') and len(job_details['description']) > 100:
+                                    if job_details and job_details.get('description'):
                                         job_data['summary'] = job_details['description']
                                         self.logger.debug(f"Extracted full description ({len(job_details['description'])} chars) for: {job_data['job_title']}")
                                     else:
