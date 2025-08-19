@@ -274,41 +274,117 @@ class HaysScraper:
         return safe
 
     def extract_job_links_from_search(self, page) -> list[str]:
+        """Collect as many job-detail links as possible by scrolling and clicking
+        any visible load-more/next controls. Stops early if `max_jobs` reached."""
         links = set()
         try:
             page.goto(self.search_url, wait_until="domcontentloaded", timeout=35000)
-            self.human_like_delay(1.2, 2.2)
+            self.human_like_delay(1.0, 2.0)
 
-            # Try to scroll to load many cards (infinite list)
-            last_height = 0
-            for _ in range(12):  # up to ~12 scrolls
+            # Helper to harvest links currently in DOM
+            def harvest() -> int:
+                added = 0
                 try:
-                    page.wait_for_selector('a:has-text("View details"), a[href*="/job-detail/"]', timeout=4000)
+                    anchors = page.query_selector_all('a[href]')
                 except Exception:
-                    pass
-                anchors = page.query_selector_all('a[href]')
+                    anchors = []
                 for a in anchors:
-                    href = a.get_attribute('href') or ''
-                    low = href.lower()
+                    try:
+                        href = a.get_attribute('href') or ''
+                    except Exception:
+                        continue
+                    low = (href or '').lower()
                     if not href or low.startswith(('mailto:', 'tel:', 'javascript:')):
                         continue
                     if '/job-detail/' in low:
                         full = href if low.startswith('http') else urljoin(self.base_url, href)
-                        links.add(full)
-                # Scroll
-                try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                except Exception:
+                        if full not in links:
+                            links.add(full)
+                            added += 1
+                return added
+
+            # Scroll incrementally until no new results arrive for a few rounds
+            target = self.max_jobs or 200
+            stable_rounds = 0
+            previous_total = 0
+            max_rounds = 80
+
+            # Initial wait for cards
+            try:
+                page.wait_for_selector('a:has-text("View details"), a[href*="/job-detail/"]', timeout=10000)
+            except Exception:
+                pass
+
+            for _ in range(max_rounds):
+                harvest()
+                if len(links) >= target:
                     break
-                self.human_like_delay(0.6, 1.2)
-                # Stop if page did not grow
+
+                # Try clicking any load-more style control if present
+                load_more_clicked = False
+                for sel in [
+                    'button:has-text("Load more")',
+                    'button:has-text("Show more")',
+                    'a:has-text("Load more")',
+                    'a:has-text("Show more")',
+                    '[aria-label*="Load more"]',
+                ]:
+                    try:
+                        el = page.query_selector(sel)
+                        if el and el.is_enabled():
+                            el.click()
+                            load_more_clicked = True
+                            self.human_like_delay(0.8, 1.6)
+                            break
+                    except Exception:
+                        continue
+
+                # Scroll by viewport height rather than jumping to bottom
                 try:
-                    new_height = page.evaluate("() => document.body.scrollHeight")
-                    if new_height == last_height:
+                    page.evaluate('window.scrollBy(0, Math.max(400, window.innerHeight - 120))')
+                except Exception:
+                    pass
+                self.human_like_delay(0.5, 1.2)
+
+                # If at bottom or nothing new for a few rounds, try a harder scroll to bottom
+                try:
+                    page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                except Exception:
+                    pass
+                self.human_like_delay(0.4, 0.9)
+
+                harvest()
+
+                # Detect stagnation
+                if len(links) == previous_total:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                    previous_total = len(links)
+
+                if stable_rounds >= 5:
+                    # Try to navigate to the next page if pagination exists
+                    navigated = False
+                    for sel in [
+                        'a[aria-label="Next page"]',
+                        'a:has-text("Next")',
+                        'button[aria-label="Next"]',
+                        'a.pagination-next',
+                    ]:
+                        try:
+                            el = page.query_selector(sel)
+                            if el and el.is_enabled():
+                                el.click()
+                                navigated = True
+                                self.human_like_delay(1.0, 1.8)
+                                break
+                        except Exception:
+                            continue
+                    if not navigated:
                         break
-                    last_height = new_height
-                except Exception:
-                    break
+                    stable_rounds = 0
+                    previous_total = len(links)
+
         except Exception as e:
             logger.warning(f"Search extraction warning: {e}")
         return list(sorted(links))
