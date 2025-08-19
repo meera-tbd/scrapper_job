@@ -302,55 +302,76 @@ class ProgrammedScraper:
 
     def extract_job_links_from_search(self, page) -> list[str]:
         links = set()
-        try:
-            page.goto(self.search_url, wait_until="domcontentloaded", timeout=35000)
-            self.human_like_delay(1.0, 1.8)
-
-            # Progressive scroll to load many results
-            last_height = 0
-            for _ in range(15):
-                anchors = page.query_selector_all('a[href]')
-                for a in anchors:
-                    href = a.get_attribute('href') or ''
-                    low = href.lower()
-                    if not href or low.startswith(('mailto:', 'tel:', 'javascript:')):
+        
+        def collect_links_current_page() -> None:
+            """Collect job detail links from the current DOM, with a small scroll."""
+            last_height_local = 0
+            for _ in range(10):
+                anchors_local = page.query_selector_all('a[href]')
+                for a_local in anchors_local:
+                    href_local = a_local.get_attribute('href') or ''
+                    low_local = href_local.lower()
+                    if not href_local or low_local.startswith(('mailto:', 'tel:', 'javascript:')):
                         continue
-                    if '/jobview/' in low or '/jobview' in low:
-                        full = href if low.startswith('http') else urljoin(self.base_url, href)
-                        links.add(full)
-                # scroll
+                    if '/jobview/' in low_local or '/jobview' in low_local:
+                        full_local = href_local if low_local.startswith('http') else urljoin(self.base_url, href_local)
+                        links.add(full_local)
+                # Gentle scroll to reveal any lazy content
                 try:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 except Exception:
                     break
-                self.human_like_delay(0.6, 1.1)
+                self.human_like_delay(0.5, 0.9)
                 try:
-                    new_height = page.evaluate("() => document.body.scrollHeight")
-                    if new_height == last_height:
+                    new_h_local = page.evaluate("() => document.body.scrollHeight")
+                    if new_h_local == last_height_local:
                         break
-                    last_height = new_height
+                    last_height_local = new_h_local
                 except Exception:
                     break
-    
-            # Try to follow simple pagination "Next" if present
-            for _ in range(6):
+
+        try:
+            # Page 1
+            page.goto(self.search_url, wait_until="domcontentloaded", timeout=35000)
+            self.human_like_delay(1.0, 1.8)
+            collect_links_current_page()
+
+            # If the UI has a Next control, try it first (covers accessibility-only arrows)
+            tried_next_clicking = False
+            for _ in range(3):
+                if self.max_jobs and len(links) >= self.max_jobs:
+                    break
                 try:
-                    next_btn = page.locator('a:has-text("Next"), button:has-text("Next")').first
+                    next_btn = page.locator('a[aria-label="Next"], button[aria-label="Next"], a:has-text("Next"), button:has-text("Next")').first
                     if not next_btn or not next_btn.is_visible():
                         break
-                    before = len(links)
+                    before_click = len(links)
                     next_btn.click(timeout=2500)
+                    tried_next_clicking = True
                     self.human_like_delay(0.8, 1.4)
                     page.wait_for_load_state('domcontentloaded', timeout=6000)
-                    anchors = page.query_selector_all('a[href]')
-                    for a in anchors:
-                        href = a.get_attribute('href') or ''
-                        low = href.lower()
-                        if '/jobview/' in low:
-                            full = href if low.startswith('http') else urljoin(self.base_url, href)
-                            links.add(full)
-                    if len(links) == before:
+                    collect_links_current_page()
+                    if len(links) == before_click:
                         break
+                except Exception:
+                    break
+
+            # Fallback: explicitly visit numeric pagination URLs /jobs/page_2/, /page_3/, ...
+            # This site uses 20 results per page; keep going until no new links or max requested reached.
+            page_index = 2
+            consecutive_empty_pages = 0
+            while (not self.max_jobs or len(links) < self.max_jobs) and consecutive_empty_pages < 2:
+                try:
+                    paged_url = f"{self.base_url}/jobs/page_{page_index}/"
+                    page.goto(paged_url, wait_until="domcontentloaded", timeout=35000)
+                    self.human_like_delay(0.9, 1.5)
+                    before_len = len(links)
+                    collect_links_current_page()
+                    if len(links) == before_len:
+                        consecutive_empty_pages += 1
+                    else:
+                        consecutive_empty_pages = 0
+                    page_index += 1
                 except Exception:
                     break
         except Exception as e:
