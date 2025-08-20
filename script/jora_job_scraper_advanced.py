@@ -707,11 +707,92 @@ class JoraJobScraper:
             self.logger.error(f"Database operation failed: {e}")
             return False
     
+    def debug_page_structure(self, page):
+        """Debug function to identify actual page structure."""
+        try:
+            self.logger.info("=== DEBUGGING PAGE STRUCTURE ===")
+            
+            # Get page title and URL
+            title = page.title()
+            url = page.url
+            self.logger.info(f"Page Title: {title}")
+            self.logger.info(f"Current URL: {url}")
+            
+            # Check for common job-related elements
+            debug_script = """
+                () => {
+                    const results = {
+                        allClasses: [],
+                        jobElements: [],
+                        dataAttributes: [],
+                        textContent: document.body.innerText.substring(0, 500)
+                    };
+                    
+                    // Get all unique classes
+                    const allElements = document.querySelectorAll('*');
+                    const classSet = new Set();
+                    
+                    allElements.forEach(el => {
+                        if (el.className && typeof el.className === 'string') {
+                            el.className.split(' ').forEach(cls => {
+                                if (cls.trim() && (cls.includes('job') || cls.includes('result') || cls.includes('card') || cls.includes('listing'))) {
+                                    classSet.add(cls.trim());
+                                }
+                            });
+                        }
+                        
+                        // Check for data attributes
+                        Array.from(el.attributes).forEach(attr => {
+                            if (attr.name.startsWith('data-') && (attr.name.includes('job') || attr.name.includes('result'))) {
+                                results.dataAttributes.push(attr.name);
+                            }
+                        });
+                    });
+                    
+                    results.allClasses = Array.from(classSet);
+                    
+                    // Look for potential job containers
+                    const jobSelectors = ['[class*="job"]', '[class*="result"]', '[class*="card"]', '[class*="listing"]', 'article'];
+                    jobSelectors.forEach(selector => {
+                        const elements = document.querySelectorAll(selector);
+                        if (elements.length > 0) {
+                            results.jobElements.push({
+                                selector: selector,
+                                count: elements.length,
+                                sample: elements[0] ? elements[0].outerHTML.substring(0, 200) : ''
+                            });
+                        }
+                    });
+                    
+                    return results;
+                }
+            """
+            
+            debug_results = page.evaluate(debug_script)
+            
+            self.logger.info(f"Job-related classes found: {debug_results['allClasses'][:20]}")
+            self.logger.info(f"Data attributes found: {list(set(debug_results['dataAttributes']))[:10]}")
+            self.logger.info(f"Page text preview: {debug_results['textContent'][:200]}...")
+            
+            for job_element in debug_results['jobElements']:
+                self.logger.info(f"Selector '{job_element['selector']}': {job_element['count']} elements")
+                if job_element['sample']:
+                    self.logger.info(f"  Sample HTML: {job_element['sample']}...")
+            
+            self.logger.info("=== END DEBUG ===")
+            
+        except Exception as e:
+            self.logger.error(f"Debug failed: {e}")
+
     def scrape_jobs_from_page(self, page):
         """Scrape all jobs from the current page."""
         jobs_found = 0
+        jobs_processed = 0  # Track total jobs processed (including duplicates)
         
         try:
+            # Debug page structure first
+            self.debug_page_structure(page)
+            
             # Wait for Jora's job results to load
             job_cards = []
             
@@ -720,17 +801,24 @@ class JoraJobScraper:
                 page.wait_for_selector('.job, .job-card, .result, .listing', timeout=15000)
                 self.human_delay(2, 4)
             except:
+                self.logger.warning("Standard selectors not found, trying alternative approach...")
                 pass
             
-            # Jora's job card selectors
+            # Enhanced Jora job card selectors (2024 update)
             selectors_to_try = [
+                '[data-testid="job-card"]',        # Modern test ID selector
                 '.job',                            # Main job container
                 '.job-card',                       # Job card container
                 '.result',                         # Result container
                 '.listing',                        # Job listing
                 '.job-item',                       # Job item
                 'article',                         # Article elements
-                '.search-result'                   # Search result
+                '.search-result',                  # Search result
+                '[class*="job"]',                  # Any class containing "job"
+                '[class*="result"]',               # Any class containing "result"
+                '[data-job-id]',                   # Elements with job ID data attribute
+                '.card',                           # Generic card selector
+                '.item'                            # Generic item selector
             ]
             
             for selector in selectors_to_try:
@@ -762,12 +850,14 @@ class JoraJobScraper:
                     # Check job limit
                     if self.job_limit and self.jobs_scraped >= self.job_limit:
                         self.logger.info(f"Reached job limit of {self.job_limit}. Stopping scraping.")
-                        return jobs_found, True  # Signal to stop
+                        return jobs_found, True, jobs_processed  # Signal to stop
                     
                     # Extract job data
                     job_data = self.extract_job_data(job_card)
                     
                     if job_data and job_data.get('job_title') and job_data.get('job_url'):
+                        jobs_processed += 1  # Count all valid job cards processed
+                        
                         # Extract full job description from individual job page using new context
                         try:
                             # Create new page context for job detail to avoid context conflicts
@@ -797,46 +887,260 @@ class JoraJobScraper:
                     self.error_count += 1
                     continue
             
-            return jobs_found, False
+            return jobs_found, False, jobs_processed
             
         except Exception as e:
             self.logger.error(f"Error scraping jobs from page: {e}")
-            return 0, False
+            return 0, False, 0
     
+    def debug_pagination_structure(self, page):
+        """Debug function to identify actual pagination structure."""
+        try:
+            self.logger.info("=== DEBUGGING PAGINATION STRUCTURE ===")
+            
+            # Check for pagination-related elements
+            debug_script = """
+                () => {
+                    const results = {
+                        paginationClasses: [],
+                        paginationElements: [],
+                        nextButtons: [],
+                        pageNumbers: [],
+                        allLinks: []
+                    };
+                    
+                    // Get all unique pagination-related classes
+                    const allElements = document.querySelectorAll('*');
+                    const classSet = new Set();
+                    
+                    allElements.forEach(el => {
+                        if (el.className && typeof el.className === 'string') {
+                            el.className.split(' ').forEach(cls => {
+                                if (cls.trim() && (cls.includes('page') || cls.includes('next') || cls.includes('prev') || cls.includes('pagination'))) {
+                                    classSet.add(cls.trim());
+                                }
+                            });
+                        }
+                    });
+                    
+                    results.paginationClasses = Array.from(classSet);
+                    
+                    // Look for pagination containers
+                    const paginationSelectors = ['[class*="page"]', '[class*="pagination"]', 'nav', '.pagination', '.pager'];
+                    paginationSelectors.forEach(selector => {
+                        const elements = document.querySelectorAll(selector);
+                        if (elements.length > 0) {
+                            results.paginationElements.push({
+                                selector: selector,
+                                count: elements.length,
+                                sample: elements[0] ? elements[0].outerHTML.substring(0, 300) : ''
+                            });
+                        }
+                    });
+                    
+                    // Look for next buttons specifically
+                    const nextSelectors = [
+                        'a[aria-label*="Next"]', 'a[aria-label*="next"]',
+                        'button[aria-label*="Next"]', 'button[aria-label*="next"]',
+                        '.next', 'a.next', 'button.next',
+                        '[rel="next"]', 'a[rel="next"]',
+                        'a:contains("Next")', 'button:contains("Next")',
+                        'a:contains(">")', 'button:contains(">")'
+                    ];
+                    
+                    nextSelectors.forEach(selector => {
+                        try {
+                            const elements = document.querySelectorAll(selector);
+                            if (elements.length > 0) {
+                                results.nextButtons.push({
+                                    selector: selector,
+                                    count: elements.length,
+                                    sample: elements[0] ? elements[0].outerHTML.substring(0, 200) : '',
+                                    disabled: elements[0] ? elements[0].disabled || elements[0].getAttribute('disabled') : false,
+                                    href: elements[0] ? elements[0].href : null
+                                });
+                            }
+                        } catch(e) {
+                            // Skip selectors that cause errors
+                        }
+                    });
+                    
+                    // Look for page numbers
+                    const pageElements = document.querySelectorAll('a[href*="page"], a[href*="p="], button[data-page]');
+                    results.pageNumbers = Array.from(pageElements).slice(0, 5).map(el => ({
+                        text: el.innerText,
+                        href: el.href,
+                        html: el.outerHTML.substring(0, 150)
+                    }));
+                    
+                    // Get all links that might be pagination
+                    const allLinks = document.querySelectorAll('a');
+                    results.allLinks = Array.from(allLinks).filter(link => 
+                        link.href && (
+                            link.href.includes('page') || 
+                            link.href.includes('p=') ||
+                            link.innerText.match(/^\d+$/) ||
+                            link.innerText.toLowerCase().includes('next') ||
+                            link.innerText.includes('>')
+                        )
+                    ).slice(0, 10).map(link => ({
+                        text: link.innerText.trim(),
+                        href: link.href,
+                        html: link.outerHTML.substring(0, 150)
+                    }));
+                    
+                    return results;
+                }
+            """
+            
+            debug_results = page.evaluate(debug_script)
+            
+            self.logger.info(f"Pagination classes found: {debug_results['paginationClasses']}")
+            
+            for pagination_element in debug_results['paginationElements']:
+                self.logger.info(f"Pagination element '{pagination_element['selector']}': {pagination_element['count']} elements")
+                if pagination_element['sample']:
+                    self.logger.info(f"  Sample HTML: {pagination_element['sample']}...")
+            
+            for next_button in debug_results['nextButtons']:
+                self.logger.info(f"Next button '{next_button['selector']}': {next_button['count']} elements")
+                self.logger.info(f"  Disabled: {next_button['disabled']}, Href: {next_button['href']}")
+                if next_button['sample']:
+                    self.logger.info(f"  Sample HTML: {next_button['sample']}...")
+            
+            self.logger.info(f"Page number elements found: {len(debug_results['pageNumbers'])}")
+            for page_num in debug_results['pageNumbers']:
+                self.logger.info(f"  Page: '{page_num['text']}' -> {page_num['href']}")
+            
+            self.logger.info(f"All pagination-related links found: {len(debug_results['allLinks'])}")
+            for link in debug_results['allLinks']:
+                self.logger.info(f"  Link: '{link['text']}' -> {link['href']}")
+            
+            self.logger.info("=== END PAGINATION DEBUG ===")
+            
+        except Exception as e:
+            self.logger.error(f"Pagination debug failed: {e}")
+
     def go_to_next_page(self, page):
         """Navigate to the next page of results."""
         try:
-            # Jora uses different selectors for next button
+            # Debug pagination structure first
+            self.debug_pagination_structure(page)
+            
+            # Enhanced Jora pagination selectors based on debug findings (2024 update)
             next_selectors = [
+                # Mobile pagination container (found in debug)
+                '.mobile-pagination a:has-text("Next")',
+                '.pagination-container a:has-text("Next")',
+                '.multi-pages-pagination .next-page-button',
+                
+                # Standard selectors
                 'a[aria-label="Next"], a[aria-label="Next Page"]',
+                'a[aria-label="next"], a[aria-label="next page"]',
+                'button[aria-label="Next"], button[aria-label="Next Page"]',
+                'button[aria-label="next"], button[aria-label="next page"]',
+                
+                # Class-based selectors
+                '.next-page-button',
                 '.next',
                 '.pagination-next',
                 'a.next',
+                'button.next',
                 '.pager .next',
-                'a[rel="next"]'
+                
+                # Attribute-based selectors
+                'a[rel="next"]',
+                'a[rel="nofollow"]:has-text("Next")',  # Found in debug output
+                
+                # Text-based selectors
+                'a:has-text("Next")',
+                'button:has-text("Next")',
+                'a:has-text(">")',
+                'button:has-text(">")',
+                
+                # Data attribute selectors
+                '[data-testid="next-page"]',
+                '[data-testid="pagination-next"]',
+                
+                # URL-based selectors (direct links to next page)
+                'a[href*="&p=2"]',    # Page parameter in URL
+                'a[href*="page=2"]',  # Direct link to page 2 if on page 1
+                'a[href*="p=2"]'      # Alternative page parameter
             ]
             
             next_button = None
-            for selector in next_selectors:
-                next_button = page.query_selector(selector)
-                if next_button and not next_button.get_attribute('disabled'):
-                    break
+            working_selector = None
             
-            if next_button:
-                self.logger.info("Clicking next page...")
+            for selector in next_selectors:
+                try:
+                    next_button = page.query_selector(selector)
+                    if next_button:
+                        # Check if button is enabled
+                        is_disabled = next_button.get_attribute('disabled')
+                        
+                        # More comprehensive visibility check
+                        is_visible = page.evaluate('''(element) => {
+                            const rect = element.getBoundingClientRect();
+                            const style = window.getComputedStyle(element);
+                            return rect.width > 0 && 
+                                   rect.height > 0 && 
+                                   style.display !== 'none' && 
+                                   style.visibility !== 'hidden' && 
+                                   style.opacity !== '0';
+                        }''', next_button)
+                        
+                        if not is_disabled and is_visible:
+                            working_selector = selector
+                            self.logger.info(f"Found working next button with selector: {selector}")
+                            break
+                        else:
+                            self.logger.info(f"Found next button with selector '{selector}' but it's disabled ({is_disabled}) or not visible ({is_visible})")
+                except Exception as e:
+                    continue
+            
+            if next_button and working_selector:
+                self.logger.info(f"Clicking next page using selector: {working_selector}")
                 
-                # Scroll to next button
-                next_button.scroll_into_view_if_needed()
-                self.human_delay(1, 2)
+                # Get current URL for comparison
+                current_url = page.url
+                self.logger.info(f"Current URL: {current_url}")
                 
-                # Click next button
-                next_button.click()
+                try:
+                    # Try different click approaches
+                    
+                    # Approach 1: Direct click without scrolling (for mobile pagination)
+                    try:
+                        next_button.click(timeout=5000)
+                        self.logger.info("Clicked next button directly")
+                    except:
+                        # Approach 2: Force click if element is not in viewport
+                        try:
+                            next_button.click(force=True, timeout=5000)
+                            self.logger.info("Force clicked next button")
+                        except:
+                            # Approach 3: JavaScript click
+                            page.evaluate('(element) => element.click()', next_button)
+                            self.logger.info("JavaScript clicked next button")
+                    
+                    # Wait for navigation
+                    page.wait_for_load_state('domcontentloaded', timeout=30000)
+                    self.human_delay(2, 4)
+                    
+                    # Verify we moved to a new page
+                    new_url = page.url
+                    self.logger.info(f"New URL: {new_url}")
+                    
+                    if new_url != current_url:
+                        self.logger.info("Successfully navigated to next page!")
+                        return True
+                    else:
+                        self.logger.warning("URL didn't change after clicking next button")
+                        return False
+                        
+                except Exception as click_error:
+                    self.logger.error(f"Failed to click next button: {click_error}")
+                    return False
                 
-                # Wait for new page to load
-                page.wait_for_load_state('domcontentloaded', timeout=30000)
-                self.human_delay(2, 4)
-                
-                return True
             else:
                 self.logger.info("No next page available or next button disabled")
                 return False
@@ -858,7 +1162,7 @@ class JoraJobScraper:
         self.logger.info(f"Job limit: {self.job_limit or 'No limit'}")
         
         with sync_playwright() as p:
-            # Launch browser with stealth settings
+            # Launch browser with enhanced stealth settings to bypass Cloudflare
             browser = p.chromium.launch(
                 headless=False,  # Visible browser for debugging
                 args=[
@@ -871,6 +1175,28 @@ class JoraJobScraper:
                     '--disable-backgrounding-occluded-windows',
                     '--disable-renderer-backgrounding',
                     '--disable-features=VizDisplayCompositor',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-ipc-flooding-protection',
+                    '--disable-default-apps',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--hide-scrollbars',
+                    '--metrics-recording-only',
+                    '--mute-audio',
+                    '--no-default-browser-check',
+                    '--no-pings',
+                    '--password-store=basic',
+                    '--use-mock-keychain',
+                    '--disable-component-extensions-with-background-pages',
+                    '--disable-background-networking',
+                    '--disable-component-update',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-hang-monitor',
+                    '--disable-popup-blocking',
+                    '--disable-prompt-on-repost',
+                    '--disable-domain-reliability',
+                    '--disable-features=AudioServiceOutOfProcess',
                     '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 ]
             )
@@ -893,43 +1219,136 @@ class JoraJobScraper:
                 }
             )
             
-            # Add stealth scripts to bypass detection
+            # Add enhanced stealth scripts to bypass Cloudflare detection
             context.add_init_script("""
+                // Remove webdriver property
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined,
                 });
                 
+                // Mock plugins
                 Object.defineProperty(navigator, 'plugins', {
                     get: () => [1, 2, 3, 4, 5],
                 });
                 
+                // Mock chrome object
                 window.chrome = {
                     runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
                 };
+                
+                // Mock permissions
+                if (window.navigator.permissions) {
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications' ?
+                            Promise.resolve({ state: 'granted' }) :
+                            originalQuery(parameters)
+                    );
+                }
+                
+                // Hide automation indicators
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                });
+                
+                Object.defineProperty(navigator, 'platform', {
+                    get: () => 'Win32',
+                });
+                
+                // Mock screen properties
+                Object.defineProperty(screen, 'colorDepth', {
+                    get: () => 24,
+                });
+                
+                // Remove automation-related properties
+                delete navigator.__proto__.webdriver;
+                
+                // Mock connection
+                Object.defineProperty(navigator, 'connection', {
+                    get: () => ({
+                        effectiveType: '4g',
+                        rtt: 50,
+                        downlink: 10
+                    }),
+                });
             """)
             
             page = context.new_page()
             
             try:
-                # Navigate to Jora Australia with retry logic
-                max_retries = 3
+                # Navigate to Jora Australia with enhanced Cloudflare bypass
+                max_retries = 5
                 for attempt in range(max_retries):
                     try:
-                        self.logger.info("Navigating to Jora Australia...")
+                        self.logger.info(f"Navigating to Jora Australia (attempt {attempt + 1})...")
                         
                         # Use Jora's job search URL
                         search_url = "https://au.jora.com/j?q=&l=Australia"
-                        page.goto(search_url, wait_until='domcontentloaded', timeout=60000)
                         
-                        # Wait for page to load completely
+                        # Navigate with longer timeout for Cloudflare challenges
+                        page.goto(search_url, wait_until='domcontentloaded', timeout=90000)
+                        
+                        # Check for Cloudflare challenge
+                        cloudflare_indicators = [
+                            'Just a moment...',
+                            'Checking your browser',
+                            'Please wait while we check your browser',
+                            'cf-browser-verification',
+                            'cf-challenge-running'
+                        ]
+                        
+                        page_content = page.content()
+                        is_cloudflare_challenge = any(indicator in page_content for indicator in cloudflare_indicators)
+                        
+                        if is_cloudflare_challenge:
+                            self.logger.info("Cloudflare challenge detected, waiting for completion...")
+                            
+                            # Wait for Cloudflare challenge to complete (up to 30 seconds)
+                            for wait_time in range(30):
+                                self.human_delay(1, 1.5)
+                                current_content = page.content()
+                                
+                                # Check if challenge is completed
+                                if not any(indicator in current_content for indicator in cloudflare_indicators):
+                                    self.logger.info("Cloudflare challenge completed!")
+                                    break
+                                    
+                                # Check for job-related content
+                                if any(keyword in current_content.lower() for keyword in ['job', 'search', 'results']):
+                                    self.logger.info("Job content detected, challenge likely passed!")
+                                    break
+                            else:
+                                self.logger.warning("Cloudflare challenge timeout, retrying...")
+                                continue
+                        
+                        # Additional wait for page to fully load
                         self.human_delay(3, 5)
+                        
+                        # Check if we successfully reached the job search page
+                        final_content = page.content()
+                        if len(final_content) < 1000:  # Too short, likely still blocked
+                            raise Exception("Page content too short, likely still blocked")
                         
                         # Try to close cookie banner if it exists
                         try:
-                            cookie_button = page.query_selector('button[id*="cookie"], button[id*="accept"], .cookie-accept')
-                            if cookie_button:
-                                cookie_button.click()
-                                self.human_delay(1, 2)
+                            cookie_selectors = [
+                                'button[id*="cookie"]',
+                                'button[id*="accept"]', 
+                                '.cookie-accept',
+                                '[data-testid="cookie-accept"]',
+                                '.gdpr-accept',
+                                '#accept-cookies'
+                            ]
+                            
+                            for selector in cookie_selectors:
+                                cookie_button = page.query_selector(selector)
+                                if cookie_button:
+                                    cookie_button.click()
+                                    self.human_delay(1, 2)
+                                    break
                         except:
                             pass
                         
@@ -940,10 +1359,16 @@ class JoraJobScraper:
                         self.logger.warning(f"Attempt {attempt + 1} failed: {e}")
                         if attempt == max_retries - 1:
                             raise
-                        self.human_delay(3, 6)
+                        
+                        # Exponential backoff with randomization
+                        wait_time = (2 ** attempt) + random.uniform(1, 3)
+                        self.logger.info(f"Waiting {wait_time:.1f} seconds before retry...")
+                        time.sleep(wait_time)
                 
                 # Start scraping
                 page_number = 1
+                consecutive_pages_no_new_jobs = 0  # Safety counter
+                max_consecutive_pages = 3  # Stop after 3 consecutive pages with no new jobs
                 
                 while True:
                     self.logger.info(f"Scraping page {page_number}...")
@@ -952,15 +1377,27 @@ class JoraJobScraper:
                     self.scroll_page(page)
                     
                     # Scrape jobs from current page
-                    jobs_found, should_stop = self.scrape_jobs_from_page(page)
+                    jobs_found, should_stop, jobs_processed = self.scrape_jobs_from_page(page)
                     
                     if should_stop:
                         self.logger.info("Job limit reached, stopping scraping.")
                         break
                     
-                    if jobs_found == 0:
-                        self.logger.info("No jobs found on this page, ending scraping.")
+                    # Improved logic: Check if we found any job listings at all (not just new ones)
+                    if jobs_processed == 0:
+                        self.logger.info(f"No job listings found on page {page_number}, ending scraping.")
                         break
+                    elif jobs_found == 0:
+                        consecutive_pages_no_new_jobs += 1
+                        self.logger.info(f"All {jobs_processed} jobs on page {page_number} were duplicates, continuing to next page... ({consecutive_pages_no_new_jobs}/{max_consecutive_pages})")
+                        
+                        # Safety check: stop if too many consecutive pages with no new jobs
+                        if consecutive_pages_no_new_jobs >= max_consecutive_pages:
+                            self.logger.info(f"Stopping after {max_consecutive_pages} consecutive pages with no new jobs.")
+                            break
+                    else:
+                        consecutive_pages_no_new_jobs = 0  # Reset counter when we find new jobs
+                        self.logger.info(f"Found {jobs_found} new jobs out of {jobs_processed} total jobs on page {page_number}")
                     
                     # Try to go to next page
                     if not self.go_to_next_page(page):
