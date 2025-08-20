@@ -1043,6 +1043,10 @@ class NSWGovernmentJobScraper:
             if 'australia' not in normalized_location.lower():
                 normalized_location += ', Australia'
             
+            # Ensure location name doesn't exceed database limit
+            if len(normalized_location) > 100:
+                normalized_location = normalized_location[:97] + "..."
+            
             location, created = Location.objects.get_or_create(
                 name=normalized_location,
                 defaults={
@@ -1096,14 +1100,26 @@ class NSWGovernmentJobScraper:
             return False
         
         try:
-            
-            # Check for duplicates - use connection.queries to avoid async issues
+            # Check for duplicates - improved duplicate detection
             try:
+                # Check by URL first
                 existing_job = JobPosting.objects.filter(external_url=job_data['url']).first()
                 if existing_job:
                     self.duplicate_count += 1
-                    self.logger.info(f"Duplicate job found: {job_data['title']}")
+                    self.logger.info(f"Duplicate job found by URL: {job_data['title']}")
                     return False
+                
+                # Check by title and company combination for better duplicate detection
+                if job_data.get('title') and job_data.get('company'):
+                    title_match = JobPosting.objects.filter(
+                        title=job_data['title'],
+                        company__name=job_data['company']
+                    ).first()
+                    if title_match:
+                        self.duplicate_count += 1
+                        self.logger.info(f"Duplicate job found by title+company: {job_data['title']}")
+                        return False
+                        
             except Exception as e:
                 self.logger.warning(f"Could not check for duplicates: {e}")
                 # Continue anyway
@@ -1128,6 +1144,10 @@ class NSWGovernmentJobScraper:
                     location_text += ', NSW'
                 if 'australia' not in location_text.lower():
                     location_text += ', Australia'
+                
+                # Ensure location name doesn't exceed database limit
+                if len(location_text) > 100:
+                    location_text = location_text[:97] + "..."
                 
                 location, created = Location.objects.get_or_create(
                     name=location_text,
@@ -1173,8 +1193,8 @@ class NSWGovernmentJobScraper:
             try:
                 from django.db import transaction
                 job_posting = JobPosting.objects.create(
-                    title=job_data['title'][:200],  # Keep title limit due to database field constraint
-                    description=job_data.get('description', job_data['title']),  # Remove description length limit
+                    title=job_data['title'],
+                    description=job_data.get('description', job_data['title']),
                     company=company,
                     posted_by=bot_user,
                     location=location,
@@ -1206,6 +1226,11 @@ class NSWGovernmentJobScraper:
                 return True
             except Exception as db_error:
                 self.logger.error(f"Database error creating job posting: {db_error}")
+                self.logger.error(f"Job data that failed: title='{job_data.get('title', '')}' (len={len(job_data.get('title', ''))})")
+                self.logger.error(f"experience_level='{job_data.get('experience_level', '')}' (len={len(job_data.get('experience_level', ''))})")
+                self.logger.error(f"external_id='{job_data.get('job_reference', '')}' (len={len(job_data.get('job_reference', ''))})")
+                self.logger.error(f"work_mode='{job_data.get('work_mode', '')}' (len={len(job_data.get('work_mode', ''))})")
+                self.logger.error(f"external_source='iworkfor.nsw.gov.au' (len={len('iworkfor.nsw.gov.au')})")
                 self.error_count += 1
                 return False
             
@@ -1239,6 +1264,11 @@ class NSWGovernmentJobScraper:
             
             self.logger.info(f"Found {len(job_cards)} job cards")
             
+            # If we're on page 1 and only got 25 cards but have a job limit > 25, 
+            # we should try pagination
+            if len(job_cards) == 25 and self.job_limit and self.job_limit > 25:
+                self.logger.info("Found exactly 25 jobs, pagination likely needed for more jobs")
+            
             jobs_processed = 0
             
             # Process each job card
@@ -1265,6 +1295,8 @@ class NSWGovernmentJobScraper:
                             job_details = self.get_job_details(job_data['url'], detail_page)
                             job_data.update(job_details)
                             detail_page.close()  # Close the detail page
+                            # Add delay to prevent browser overload
+                            self.human_delay(0.5, 1)
                         except Exception as e:
                             self.logger.warning(f"Could not get details for job {job_data['title']}: {e}")
                             try:
@@ -1293,8 +1325,9 @@ class NSWGovernmentJobScraper:
     def handle_pagination(self, page):
         """Handle pagination on NSW Government job portal."""
         try:
-            # Look for pagination controls
+            # Look for pagination controls using the specific structure we found
             pagination_selectors = [
+                '.list-navigation', '.btn-toolbar[aria-label*="pagination"]',
                 '.pagination', '.pager', '.page-navigation',
                 '[data-pagination]', '.page-controls'
             ]
@@ -1303,31 +1336,61 @@ class NSWGovernmentJobScraper:
             for selector in pagination_selectors:
                 pagination = page.query_selector(selector)
                 if pagination:
+                    self.logger.info(f"Found pagination with selector: {selector}")
                     break
             
             if not pagination:
+                self.logger.warning("No pagination controls found")
                 return False
             
-            # Look for next button
+            # Look for next button using the specific structure from the HTML
             next_selectors = [
-                'a[aria-label*="Next"]', '.next', '.page-next',
-                'a[title*="Next"]', 'button[aria-label*="Next"]'
+                'button[aria-label="Pagination - Go to Next"]',
+                'button[title="Next"]',
+                'button[aria-label*="Next"]', 
+                '.next', '.page-next',
+                'a[title*="Next"]'
             ]
             
             next_button = None
             for selector in next_selectors:
                 next_button = page.query_selector(selector)
-                if next_button and next_button.is_enabled():
+                if next_button and next_button.is_enabled() and not next_button.get_attribute('class').__contains__('disabled'):
+                    self.logger.info(f"Found next button with selector: {selector}")
                     break
             
             if next_button and next_button.is_enabled():
-                self.logger.info("Found next page button, clicking...")
-                next_button.click()
-                page.wait_for_load_state('domcontentloaded')
-                self.human_delay(2, 4)
-                return True
-            
-            return False
+                # Check if the button is not disabled
+                button_classes = next_button.get_attribute('class') or ''
+                if 'disabled' not in button_classes:
+                    self.logger.info("Clicking next page button...")
+                    
+                    # Wait for any pending requests before clicking
+                    try:
+                        page.wait_for_load_state('networkidle', timeout=3000)
+                    except:
+                        pass
+                    
+                    # Click the next button
+                    next_button.click()
+                    
+                    # Wait for page to load
+                    page.wait_for_load_state('domcontentloaded')
+                    self.human_delay(3, 6)  # Longer delay for pagination
+                    
+                    # Wait for network to be idle after pagination
+                    try:
+                        page.wait_for_load_state('networkidle', timeout=10000)
+                    except:
+                        pass
+                    
+                    return True
+                else:
+                    self.logger.info("Next button is disabled")
+                    return False
+            else:
+                self.logger.info("No enabled next button found")
+                return False
             
         except Exception as e:
             self.logger.error(f"Error handling pagination: {e}")

@@ -463,16 +463,15 @@ class TalentAustraliaJobScraper:
             return False
     
     def find_job_elements(self):
-        """Find job card elements on the current page using static selectors."""
-        self.logger.info("Searching for job elements...")
+        """Find job card elements on the current page using correct selectors."""
+        self.logger.info("Searching for job elements with corrected selectors...")
         
-        # Static hardcoded selectors based on website inspection
+        # Corrected selectors based on website debugging
         selectors = [
-            "section[data-testid*='jobcard-container']",
-            "[data-testid*='jobcard-container']",
-            "div[class*='job-card']",
-            "article[class*='job']",
-            "section[class*='card']"
+            "main section",  # Primary selector - found 21 elements (perfect for ~20 jobs per page)
+            "[data-testid*='card']",  # Secondary selector - also found 21 elements
+            "section[data-testid*='jobcard-container']",  # Fallback
+            "[data-testid*='jobcard-container']"  # Fallback
         ]
         
         for selector in selectors:
@@ -480,8 +479,24 @@ class TalentAustraliaJobScraper:
                 self.logger.info(f"Trying selector: {selector}")
                 elements = self.page.query_selector_all(selector)
                 if elements:
-                    self.logger.info(f"Found {len(elements)} elements using selector: {selector}")
-                    return elements
+                    # Validate these are actually job cards by checking content
+                    valid_job_elements = []
+                    for element in elements:
+                        try:
+                            text = element.text_content().lower()
+                            # Check for job-related keywords
+                            if any(keyword in text for keyword in ['remote', 'australia', 'promoted', 'company', 'ago']):
+                                # Additional check: must contain some substantial text
+                                if len(text.strip()) > 50:
+                                    valid_job_elements.append(element)
+                        except:
+                            continue
+                    
+                    if valid_job_elements:
+                        self.logger.info(f"Found {len(valid_job_elements)} valid job elements using selector: {selector}")
+                        return valid_job_elements
+                    else:
+                        self.logger.debug(f"Found {len(elements)} elements but none are valid job cards with selector: {selector}")
                 else:
                     self.logger.debug(f"No elements found with selector: {selector}")
             except Exception as e:
@@ -494,13 +509,13 @@ class TalentAustraliaJobScraper:
     def extract_job_data(self, job_element, search_term, location):
         """Extract job data from a single job element using static selectors."""
         try:
-            # Static selector-based field extraction
+            # Corrected selector-based field extraction based on debugging
             title = self.extract_text_by_selectors(job_element, [
-                "h2",
-                "[data-testid='JobCardContainer'] h2",
-                "h2[color='#30183F']",
+                "h2",  # Primary selector - debugging found 22 h2 elements with job titles
                 "h3",
-                "a[href*='view'] h2"
+                "[data-testid*='title']",
+                "a[href*='view'] h2",
+                "a h2"
             ])
             
             company = self.extract_text_by_selectors(job_element, [
@@ -558,22 +573,9 @@ class TalentAustraliaJobScraper:
             salary = self.clean_text(salary) if salary else ""
             posted_date = self.clean_text(posted_date) if posted_date else ""
             
-            # Try to get full description from job detail page if URL is available
-            description = ""
-            if url:
-                try:
-                    description = self.extract_full_job_description(url)
-                    if description:
-                        self.logger.debug(f"Extracted full description ({len(description)} chars) for: {title}")
-                    else:
-                        # Fallback to basic description if full extraction fails
-                        description = self.clean_text(basic_description) if basic_description else ""
-                        self.logger.debug(f"Using basic description fallback for: {title}")
-                except Exception as e:
-                    self.logger.error(f"Error getting full description for {title}: {e}")
-                    description = self.clean_text(basic_description) if basic_description else ""
-            else:
-                description = self.clean_text(basic_description) if basic_description else ""
+            # Use basic description from job card initially
+            # Full description will be extracted later to avoid navigation issues during the loop
+            description = self.clean_text(basic_description) if basic_description else ""
             
             # Detect job type from all available information including job_type_info
             detected_job_type = self.detect_job_type(job_element, title, description, job_type_info)
@@ -878,17 +880,36 @@ class TalentAustraliaJobScraper:
         return None
     
     def get_or_create_company(self, company_name):
-        """Get or create company object."""
+        """Get or create company object with better duplicate handling."""
         try:
-            company, created = Company.objects.get_or_create(
+            # Keep company name as is without truncation
+            
+            # First try to find existing company by name
+            try:
+                company = Company.objects.get(name=company_name)
+                return company
+            except Company.DoesNotExist:
+                pass
+            
+            # Create unique slug for new company
+            base_slug = slugify(company_name)
+            unique_slug = base_slug
+            counter = 1
+            
+            while Company.objects.filter(slug=unique_slug).exists():
+                unique_slug = f"{base_slug}-{counter}"
+                counter += 1
+            
+            # Keep slug as is without length restriction
+            
+            company = Company.objects.create(
                 name=company_name,
-                defaults={
-                    'slug': slugify(company_name),
-                    'description': f'Company profile for {company_name}',
-                    'company_size': 'medium'
-                }
+                slug=unique_slug,
+                description=f'Company profile for {company_name}',
+                company_size='medium'
             )
             return company
+            
         except Exception as e:
             self.logger.error(f"Error creating company {company_name}: {e}")
             return None
@@ -969,10 +990,24 @@ class TalentAustraliaJobScraper:
                 )
                 tags_str = ','.join(tags_list[:10])  # Limit to 10 tags
                 
+                # Create unique slug to avoid duplicates
+                base_slug = slugify(job_data['title'])
+                company_part = slugify(company.name)  # Keep full company part
+                unique_slug = f"{base_slug}-{company_part}"
+                
+                # Handle slug length and uniqueness
+                counter = 1
+                original_slug = unique_slug
+                while JobPosting.objects.filter(slug=unique_slug).exists():
+                    unique_slug = f"{original_slug}-{counter}"
+                    counter += 1
+                
+                # Keep slug as is without length restriction
+                
                 # Create job posting
                 job_posting = JobPosting.objects.create(
                     title=job_data['title'],
-                    slug=slugify(job_data['title']),
+                    slug=unique_slug,
                     description=job_data.get('description', ''),
                     company=company,
                     location=location,
@@ -1021,60 +1056,24 @@ class TalentAustraliaJobScraper:
     def detect_pagination(self):
         """Detect if pagination is available and return next page element."""
         try:
-            self.logger.debug("Starting pagination detection...")
-            
-            # First, let's check if there are any pagination elements at all
-            pagination_containers = [
-                'nav',
-                '.pagination', 
-                '[class*="pagination"]',
-                'div:has(a[href*="&p="])',
-                'div:has(a[href*="?p="])'
-            ]
-            
-            pagination_found = False
-            for container_selector in pagination_containers:
-                try:
-                    container = self.page.query_selector(container_selector)
-                    if container:
-                        self.logger.debug(f"Found pagination container: {container_selector}")
-                        pagination_found = True
-                        break
-                except:
-                    continue
-            
-            if not pagination_found:
-                self.logger.debug("No pagination container found")
-            
-            # Enhanced selectors for Talent.com pagination based on actual site structure
-            next_page_selectors = [
-                # Look for any link with page parameter that's higher than current page
-                'a[href*="&p=2"]',  # Direct link to page 2
-                'a[href*="?p=2"]',  # Direct link to page 2 (different URL structure)
-                'a[href*="&p=3"]',  # Direct link to page 3
-                'a[href*="?p=3"]',  # Direct link to page 3
-                
-                # Look for next page arrows/buttons
-                'nav a[class*="cRgWnE"]',  # Your provided next page arrow
-                'a:has(svg)',  # Any link with SVG (likely arrow)
-                'nav a:last-child',  # Last link in navigation
-                
-                # Generic next page patterns
-                'a:has-text("Next")',
-                'a:has-text(">")', 
-                'a[aria-label*="Next"]',
-                'a[title*="Next"]',
-                
-                # Look for page number links
-                'a[href*="/jobs"][href*="p="]:not([class*="gSKnXL"])',
-                
-                # Broader search for any pagination links
-                'a[href*="&p="]',
-                'a[href*="?p="]'
-            ]
+            self.logger.debug("Starting pagination detection with corrected selectors...")
             
             current_url = self.page.url
             self.logger.debug(f"Current URL: {current_url}")
+            
+            # Based on debugging, we found pagination links with 'a[href*="&p="]'
+            # The debugging found 2 pagination elements
+            next_page_selectors = [
+                'a[href*="&p="]',  # Primary selector found during debugging
+                'a[href*="?p="]',  # Alternative URL structure
+                'a:has-text("2")',  # Page number 2
+                'a:has-text("3")',  # Page number 3
+                'a:has-text("Next")',
+                'a:has-text(">")',
+                'a[aria-label*="Next"]',
+                'button:has-text("Next")',
+                'button:has-text(">")'
+            ]
             
             # Extract current page number from URL if present
             current_page = 1
@@ -1238,6 +1237,27 @@ class TalentAustraliaJobScraper:
                     self.errors_count += 1
                     continue
             
+            # Now extract full descriptions for all jobs (after collecting basic data)
+            # This prevents navigation issues during the main job extraction loop
+            self.logger.info(f"Extracting full descriptions for {len(jobs_data)} jobs from page {page_num}...")
+            for i, job_data in enumerate(jobs_data):
+                try:
+                    if job_data.get('external_url'):
+                        self.logger.debug(f"Getting full description for job {i+1}: {job_data['title']}")
+                        full_description = self.extract_full_job_description(job_data['external_url'])
+                        if full_description and len(full_description) > len(job_data.get('description', '')):
+                            job_data['description'] = full_description
+                            self.logger.debug(f"Updated description for {job_data['title']} ({len(full_description)} chars)")
+                        else:
+                            self.logger.debug(f"Keeping basic description for {job_data['title']}")
+                    
+                    # Small delay between description extractions
+                    self.human_delay(0.5, 1.0)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error extracting full description for job {i+1}: {e}")
+                    continue
+            
             return jobs_data
             
         except Exception as e:
@@ -1299,70 +1319,77 @@ class TalentAustraliaJobScraper:
         """Main scraping orchestrator for Talent.com Australia with pagination support."""
         start_time = datetime.now()
         
-        self.logger.info("Starting Talent.com Australia job scraping with pagination support...")
+        self.logger.info("Starting Talent.com Australia job scraping with FIXED pagination support...")
         self.logger.info(f"Target: {self.job_limit or 'unlimited'} jobs")
-        self.logger.info(f"Max searches: {max_searches}")
-        self.logger.info(f"Max pages per search: {max_pages_per_search}")
-        self.logger.info("Using dynamic search terms and locations with pagination for comprehensive coverage")
+        self.logger.info(f"Max pages to scrape: {max_pages_per_search}")
+        self.logger.info("Using FIXED URL with proper pagination handling - NO search term changes")
         
         try:
             # Setup browser
             self.setup_browser()
             
-            # Generate dynamic search combinations - no static patterns!
-            search_combinations = []
-            for i in range(max_searches):
-                search_term, location = self.get_intelligent_search_combination()
-                search_combinations.append((search_term, location))
-                self.logger.info(f"Generated search {i+1}: '{search_term}' in '{location or 'Australia'}'")
+            # Use the specific URL instead of generating search combinations
+            fixed_url = "https://au.talent.com/jobs?l=Australia&id=7563d299b20e"
+            self.logger.info(f"Using fixed URL: {fixed_url}")
             
-            # Scrape jobs with human-like behavior
-            for i, (search_term, location) in enumerate(search_combinations, 1):
-                if self.job_limit and (self.jobs_saved >= self.job_limit or self.jobs_scraped >= self.job_limit):
+            # Navigate directly to the specific URL
+            self.logger.info("Navigating to the fixed URL...")
+            self.page.goto(fixed_url, wait_until='networkidle', timeout=60000)
+            
+            # Wait for page to load completely
+            self.page.wait_for_selector('body', timeout=10000)
+            self.human_delay(2, 4)
+            
+            self.logger.info("Successfully loaded the fixed URL page")
+            
+            # Scrape with pagination from the fixed URL
+            all_jobs_data = []
+            current_page = 1
+            
+            while current_page <= max_pages_per_search:
+                self.logger.info(f"\n--- Processing page {current_page}/{max_pages_per_search} ---")
+                
+                # Scrape jobs from current page
+                page_jobs = self.scrape_jobs_from_current_page("Fixed URL Scraper", "Australia", current_page)
+                
+                if page_jobs:
+                    all_jobs_data.extend(page_jobs)
+                    self.pages_scraped += 1
+                    self.logger.info(f"Page {current_page} completed: {len(page_jobs)} jobs extracted")
+                else:
+                    self.logger.warning(f"No jobs found on page {current_page}")
+                    self.pages_scraped += 1
+                
+                # Check if we should continue
+                if self.job_limit and self.jobs_scraped >= self.job_limit:
                     self.logger.info(f"Reached job limit: {self.job_limit}")
                     break
                 
-                self.logger.info(f"\n--- Search {i}/{len(search_combinations)}: '{search_term}' in '{location or 'Australia'}' ---")
+                # Try to go to next page
+                if current_page < max_pages_per_search:
+                    if self.navigate_to_next_page():
+                        current_page += 1
+                        # Add delay between pages
+                        self.human_delay(3, 6)
+                    else:
+                        self.logger.info("No more pages available or reached end of pagination")
+                        break
+                else:
+                    self.logger.info(f"Reached maximum pages limit: {max_pages_per_search}")
+                    break
+            
+            # Save jobs to database
+            self.logger.info(f"Saving {len(all_jobs_data)} jobs to database...")
+            for job_data in all_jobs_data:
+                if self.job_limit and self.jobs_saved >= self.job_limit:
+                    self.logger.info(f"Reached save limit: {self.job_limit}")
+                    break
                 
-                # Add human-like behavior before each search
-                self.add_human_search_behavior()
+                self.save_job_to_database(job_data)
                 
-                try:
-                    # Scrape current search with pagination
-                    jobs_data = self.scrape_page(search_term, location, max_pages_per_search)
-                    
-                    # Save jobs to database with human-like patterns
-                    for job_data in jobs_data:
-                        if self.job_limit and self.jobs_saved >= self.job_limit:
-                            self.logger.info(f"Reached save limit: {self.job_limit}")
-                            break
-                        
-                        self.save_job_to_database(job_data)
-                        
-                        # Variable delay between saves (more human-like)
-                        save_delay = random.uniform(0.5, 2.0)
-                        time.sleep(save_delay)
-                    
-                except Exception as e:
-                    self.logger.error(f"Error in search {i}: {e}")
-                    self.errors_count += 1
-                    
-                    # Even on error, behave human-like (don't rush to next search)
-                    error_pause = random.uniform(10, 30)
-                    self.logger.info(f"Error occurred, pausing {error_pause:.1f}s before continuing...")
-                    time.sleep(error_pause)
-                    continue
-                
-                # Intelligent delay between searches - varies based on success
-                if i < len(search_combinations):
-                    if jobs_data:  # If we found jobs, take a longer break (like a real person would)
-                        delay = random.uniform(20, 60)
-                        self.logger.info(f"Search successful, taking {delay:.1f}s break before next search")
-                    else:  # If no jobs found, shorter break
-                        delay = random.uniform(10, 25)
-                        self.logger.info(f"No jobs found, taking {delay:.1f}s break before trying different search")
-                    
-                    time.sleep(delay)
+                # Variable delay between saves
+                save_delay = random.uniform(0.5, 2.0)
+                time.sleep(save_delay)
             
         except Exception as e:
             self.logger.error(f"Error during scraping: {e}")
@@ -1390,7 +1417,7 @@ class TalentAustraliaJobScraper:
         duration = end_time - start_time
         
         print("\n" + "="*80)
-        print("TALENT.COM AUSTRALIA SCRAPING COMPLETED!")
+        print("TALENT.COM AUSTRALIA SCRAPING COMPLETED! (FIXED PAGINATION)")
         print("="*80)
         print(f"Duration: {duration}")
         print(f"Pages scraped: {self.pages_scraped}")
@@ -1403,12 +1430,8 @@ class TalentAustraliaJobScraper:
             success_rate = (self.jobs_saved / self.jobs_scraped) * 100
             print(f"Success rate: {success_rate:.1f}%")
         
-        # Database statistics
-        try:
-            total_talent_jobs = JobPosting.objects.filter(external_source='au.talent.com').count()
-            print(f"Total Talent.com Australia jobs in database: {total_talent_jobs}")
-        except Exception as e:
-            self.logger.error(f"Error getting database stats: {e}")
+        # Database statistics (skip to avoid async context issues)
+        print(f"Note: Database statistics skipped to avoid async context issues")
         
         print("="*80)
 
@@ -1433,7 +1456,8 @@ def main():
     
     # Initialize and run scraper
     scraper = TalentAustraliaJobScraper(job_limit=job_limit)
-    scraper.run_scraping(max_searches=5, max_pages_per_search=3)
+    # Fixed: Use more pages since we're only doing one URL now
+    scraper.run_scraping(max_searches=1, max_pages_per_search=10)
 
 
 if __name__ == "__main__":
