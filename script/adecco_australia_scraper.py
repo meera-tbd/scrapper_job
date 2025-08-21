@@ -828,26 +828,34 @@ class AdeccoAustraliaJobScraper:
             return default_result
     
     def _extract_description_from_selectors(self, page, page_content):
-        """Extract description using CSS selectors."""
-        description_selectors = [
-            '.job-description',
-            '[class*="description"]',
-            '.content',
-            '[class*="content"]',
-            'main',
-            '.job-details'
+        """Extract complete job description content from individual job pages."""
+        
+        # Based on debugging, 'main' element contains the complete job description
+        # with all sections: About Us, Responsibilities, Your Profile, Contact
+        priority_selectors = [
+            'main',                         # Main content area - contains complete job description
+            'body',                         # Full body content as fallback
         ]
         
-        for selector in description_selectors:
+        # Try priority selectors first (these contain complete descriptions)
+        for selector in priority_selectors:
             try:
                 element = page.query_selector(selector)
                 if element:
-                    text = element.inner_text().strip()
-                    if len(text) > 100:  # Ensure we got substantial content
-                        return self._clean_description_text(text)
-            except Exception:
+                    full_text = element.inner_text().strip()
+                    if len(full_text) > 1000:  # Should be substantial for complete descriptions
+                        # Extract only the job description part, removing navigation
+                        clean_description = self._extract_clean_job_description(full_text)
+                        if len(clean_description) > 300:  # Ensure we have substantial content
+                            logger.info(f"Extracted description using {selector}: {len(clean_description)} chars")
+                            return clean_description
+            except Exception as e:
+                logger.debug(f"Error with selector {selector}: {e}")
                 continue
-        return ''
+        
+        # Fallback to original method if main extraction fails
+        logger.warning("Main extraction failed, using fallback method")
+        return self._extract_description_after_copy_link(page, page_content)
     
     def _extract_description_after_copy_link(self, page, page_content):
         """Extract description content that appears after 'Copy Link' section."""
@@ -880,6 +888,185 @@ class AdeccoAustraliaJobScraper:
         
         return '\n'.join(description_lines) if description_lines else ''
     
+    def _is_job_description_content(self, text):
+        """Check if text contains actual job description content, not navigation."""
+        text_lower = text.lower()
+        
+        # Reject if it contains obvious navigation elements
+        navigation_indicators = [
+            'looking for panel beaters automotive / aerospace trades & services',
+            'electrician – tram project manufacturing / textile',
+            'navigate_before ... navigate_next',
+            'compass_calibration full time',
+            'apply for job save job copy link',
+            'go to job detail page'
+        ]
+        
+        for indicator in navigation_indicators:
+            if indicator in text_lower:
+                return False
+        
+        # Must contain job description indicators
+        job_indicators = [
+            'about us', 'responsibilities', 'requirements', 'your profile',
+            'what we offer', 'contact', 'role', 'position', 'experience'
+        ]
+        
+        return any(indicator in text_lower for indicator in job_indicators)
+    
+    def _contains_job_listings(self, text):
+        """Check if element contains job listings navigation."""
+        text_lower = text.lower()
+        return any(indicator in text_lower for indicator in [
+            'looking for panel beaters',
+            'electrician – tram project',
+            'hr manager – 3-month contract',
+            'qualified spray painter',
+            'store manager',
+            'retail sales associate'
+        ])
+    
+    def _clean_job_description_only(self, text):
+        """Clean text to contain only job description, removing navigation elements."""
+        lines = text.split('\n')
+        clean_lines = []
+        
+        # Skip lines that are clearly navigation
+        skip_indicators = [
+            'looking for panel beaters',
+            'automotive / aerospace',
+            'trades & services',
+            'compass_calibration',
+            'navigate_before',
+            'navigate_next',
+            'apply for job',
+            'save job',
+            'copy link',
+            'go to job detail page',
+            '$ 70000 - $ 80000 / year',
+            '$ 60 - $ 62 / hour',
+            'permanent', 'temporary', 'casual', 'full time', 'part time'
+        ]
+        
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+                
+            line_lower = line_clean.lower()
+            
+            # Skip navigation lines
+            if any(skip in line_lower for skip in skip_indicators):
+                continue
+            
+            # Skip single words that are UI elements
+            if len(line_clean.split()) == 1 and line_lower in ['permanent', 'temporary', 'casual', 'remote', 'full', 'time']:
+                continue
+                
+            clean_lines.append(line_clean)
+        
+        return '\n'.join(clean_lines)
+    
+    def _extract_clean_job_description(self, full_text):
+        """Extract clean job description from main content, removing navigation and keeping job sections."""
+        lines = full_text.split('\n')
+        
+        # Find the start of the actual job content (skip navigation/header)
+        start_indicators = [
+            'adecco',                           # Adecco company intro
+            'about us',                         # About Us section
+            'from high-speed trains',           # Alstom intro (common client)
+            'our client',                       # Job description start
+            'we are',                          # Company/role description
+            'role summary',                    # Role description
+            'responsibilities',                # Responsibilities section
+            'key responsibilities'             # Key responsibilities
+        ]
+        
+        # Find where job content ends (before footer/references)
+        end_indicators = [
+            'ref: jn-',                        # Reference number at end
+            'with more than 10,000 branches',  # Adecco footer
+            'privacy policy',                  # Footer links
+            'terms and conditions',            # Footer links
+            'security & phishing',             # Footer content
+            'modern slavery statement'         # Footer content
+        ]
+        
+        # Skip obvious navigation elements
+        skip_patterns = [
+            'timesheets', 'careers at adecco', 'online centre', 'payroll',
+            'skip to main', 'candidate', 'employers', 'industries', 
+            'about usexpand_more', 'newsJoin our team', 'contactcontact',
+            'job titlelocationlocation_on', 'search jobsfilter_alt',
+            'saved jobs', 'most recentexpand_more', 'compass_calibration',
+            'construction workers', 'panel beaters', 'electrician',  # Job listing titles
+            'hr manager', 'store manager', 'retail sales associate',
+            '$ 35 - $ 48 / hour', '$ 80000 - $ 90000 / year',        # Salary ranges from listings
+            'ottoway, south australia', 'townsville, queensland',    # Location listings
+            'temporary', 'permanent', 'full time', 'casual'          # Employment type listings (when standalone)
+        ]
+        
+        job_lines = []
+        capture_mode = False
+        
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                if capture_mode:
+                    job_lines.append('')  # Preserve paragraph spacing
+                continue
+            
+            line_lower = line_clean.lower()
+            
+            # Check if we should stop capturing
+            if any(end_pattern in line_lower for end_pattern in end_indicators):
+                break
+            
+            # Check if we should start capturing
+            if not capture_mode:
+                if any(start_pattern in line_lower for start_pattern in start_indicators):
+                    capture_mode = True
+                    # Include this line as it's likely the start of job content
+                    if len(line_clean) > 10:  # Skip very short lines
+                        job_lines.append(line_clean)
+                continue
+            
+            # If we're in capture mode, filter out navigation/listing content
+            if capture_mode:
+                # Skip navigation and job listing pollution
+                if any(skip_pattern in line_lower for skip_pattern in skip_patterns):
+                    continue
+                
+                # Skip single words that are likely UI elements
+                if len(line_clean.split()) == 1 and line_lower in [
+                    'temporary', 'permanent', 'casual', 'remote', 'full', 'time', 'part'
+                ]:
+                    continue
+                
+                # Skip lines that look like salary ranges from job listings
+                if ('$' in line_clean and ('hour' in line_lower or 'year' in line_lower) and 
+                    len(line_clean) < 50):
+                    continue
+                
+                # Include substantial content lines
+                if len(line_clean) > 3:
+                    job_lines.append(line_clean)
+        
+        # Clean up and format the result
+        description = '\n'.join(job_lines)
+        
+        # Remove excessive whitespace but preserve structure
+        import re
+        description = re.sub(r'\n{3,}', '\n\n', description)
+        description = re.sub(r' {2,}', ' ', description)
+        
+        return description.strip()
+    
+    def _extract_job_description_only(self, full_text):
+        """Legacy method - now redirects to the improved extraction method."""
+        return self._extract_clean_job_description(full_text)
+    
     def _extract_description_from_paragraphs(self, page, page_content):
         """Extract description from paragraph elements."""
         try:
@@ -904,62 +1091,77 @@ class AdeccoAustraliaJobScraper:
             return ''
     
     def _clean_description_text(self, text):
-        """Clean and format description text."""
+        """Clean and format description text while preserving comprehensive content from About Us to Contact."""
         lines = text.split('\n')
         cleaned_lines = []
         
-        # Find the section after "Copy Link" which contains the main job description
-        copy_link_found = False
-        description_started = False
-        
-        # Remove unwanted navigation and site elements
+        # More comprehensive content collection - don't skip too much
         unwanted_elements = [
             'adecco navigation', 'site navigation', 'website menu',
-            'cookie policy', 'privacy policy', 'subscribe to newsletter', 
-            'footer navigation', 'header menu', 'sidebar menu',
-            'apply now', 'apply for job', 'save job', 'share job',
-            'powered by', 'copyright', 'all rights reserved'
+            'skip to main', 'candidate expand_more', 'employers expand_more',
+            'timesheets', 'online centre', 'payroll language',
+            'search jobs', 'filter_alt filter', 'saved jobs'
         ]
+        
+        # Track if we're in job content vs navigation
+        in_job_content = False
         
         for line in lines:
             line = line.strip()
-            if line:
-                # Check if we've reached the "Copy Link" section
-                if 'copy link' in line.lower():
-                    copy_link_found = True
+            if not line:
+                if in_job_content:
+                    cleaned_lines.append('')  # Preserve paragraph breaks in job content
+                continue
+            
+            line_lower = line.lower()
+            
+            # Skip obvious navigation elements
+            if any(unwanted in line_lower for unwanted in unwanted_elements):
+                continue
+            
+            # Start collecting content when we hit job-related sections
+            if not in_job_content:
+                if any(keyword in line_lower for keyword in [
+                    'about us', 'about the company', 'about the role', 'job details',
+                    'role summary', 'what we offer', 'responsibilities', 'requirements',
+                    'qualifications', 'experience', 'skills', 'benefits', 'contact',
+                    'join', 'our client', 'seeking', 'we are', 'position', 'role',
+                    'opportunity', 'employment', 'vacancy'
+                ]):
+                    in_job_content = True
+            
+            # Stop collecting at obvious footer/policy content
+            if any(footer_element in line_lower for footer_element in [
+                'privacy policy', 'website terms', 'cookie policy',
+                'all rights reserved', 'modern slavery statement'
+            ]):
+                break
+            
+            # Include content if we're in the job content section
+            if in_job_content:
+                # Skip very short lines that are likely navigation, but keep important short ones
+                if len(line) < 3 and not re.match(r'^[A-Z][a-z]*:?$', line):
                     continue
                 
-                # Start collecting description after Copy Link
-                if copy_link_found and not description_started:
-                    # Look for lines that indicate start of job description
-                    if any(keyword in line.lower() for keyword in ['join', 'our client', 'seeking', 'we are', 'position', 'role']):
-                        description_started = True
-                
-                # Skip unwanted elements
-                line_lower = line.lower()
-                if any(unwanted in line_lower for unwanted in unwanted_elements):
+                # Skip lines that are just numbers
+                if re.match(r'^\d+$', line):
                     continue
                 
-                # Skip very short lines that are likely navigation
-                if len(line) < 3:
-                    continue
-                
-                # Skip lines that are just numbers or single words
-                if re.match(r'^\d+$', line) or (len(line.split()) == 1 and len(line) < 15):
-                    continue
-                
-                # Prioritize lines after Copy Link section
-                if copy_link_found and description_started:
-                    cleaned_lines.append(line)
-                elif not copy_link_found:
-                    # Include general content if Copy Link section not found
-                    cleaned_lines.append(line)
+                cleaned_lines.append(line)
+            # Even if not in job content yet, include substantial lines that might be job-related
+            elif len(line) > 30 and any(keyword in line_lower for keyword in [
+                'role', 'position', 'job', 'opportunity', 'employment', 'career',
+                'responsible', 'duties', 'skills', 'experience', 'qualification'
+            ]):
+                in_job_content = True
+                cleaned_lines.append(line)
         
-        # Join lines and clean up extra whitespace
+        # Join lines and clean up extra whitespace while preserving structure
         full_description = '\n'.join(cleaned_lines)
         
-        # Remove multiple consecutive newlines
-        full_description = re.sub(r'\n{3,}', '\n\n', full_description)
+        # Remove excessive consecutive newlines but preserve paragraph structure
+        import re
+        full_description = re.sub(r'\n{4,}', '\n\n\n', full_description)
         
         return full_description.strip()
     
@@ -1212,8 +1414,28 @@ class AdeccoAustraliaJobScraper:
             time.sleep(0.2)
 
     def _find_left_column_job_cards(self, page):
-        """Return a list of elements that are likely left-column job cards only.
-        We filter candidates by position (x coordinate) to avoid the right detail panel."""
+        """Return a list of job card elements using the correct selectors discovered from debugging."""
+        # Use the selectors that actually work - found from website debugging
+        primary_selectors = [
+            '.card',           # Primary selector: exactly 10 job cards per page
+            'article',         # Alternative: exactly 10 article elements per page  
+        ]
+        
+        for selector in primary_selectors:
+            try:
+                elements = page.query_selector_all(selector)
+                if len(elements) == 10:  # Perfect match - 10 jobs per page
+                    logger.info(f"Found {len(elements)} job cards using selector: {selector}")
+                    return elements
+                elif 8 <= len(elements) <= 12:  # Close enough
+                    logger.info(f"Found {len(elements)} job cards using selector: {selector} (close to 10)")
+                    return elements
+            except Exception as e:
+                logger.debug(f"Error with selector {selector}: {e}")
+                continue
+        
+        # Fallback to original method if needed
+        logger.warning("Using fallback job card detection method")
         candidates_selectors = [
             'div:has-text("Permanent")',
             'div:has-text("Temporary")',
@@ -1260,12 +1482,34 @@ class AdeccoAustraliaJobScraper:
         t = title.strip()
         if len(t) < 3 or len(t) > 160:  # Allow shorter titles like "UX Designer"
             return False
+        
+        # Enhanced banned terms to catch fake job titles
         banned = [
             'timesheets', 'job title', 'saved jobs', 'employers', 'candidates',
-            'most recent', 'check your', 'navigation', 'menu', 'header', 'footer'
+            'most recent', 'check your', 'navigation', 'menu', 'header', 'footer',
+            'online centre', 'adecco works for everyone', 'cookie policy', 'privacy policy',
+            'about us', 'contact us', 'terms and conditions', 'site navigation',
+            'main navigation', 'breadcrumb', 'search results', 'filter by', 'sort by',
+            'privacy preference center', 'preference center', 'privacy preferences'
         ]
         if any(b in t.lower() for b in banned):
             return False
+        
+        # Reject titles that are just company names or generic website text
+        company_names = ['adecco', 'seek', 'linkedin', 'indeed', 'jobsearch']
+        if t.lower() in company_names:
+            return False
+        
+        # Reject titles that look like website UI elements
+        ui_patterns = [
+            r'^(search|filter|sort|view|show|hide|toggle|click|select)$',
+            r'^(page \d+|next|previous|back|home|login|logout|register)$',
+            r'^(yes|no|ok|cancel|submit|apply now|save job)$'
+        ]
+        for pattern in ui_patterns:
+            if re.match(pattern, t.lower()):
+                return False
+        
         # Must contain at least one alphabetic character
         if not re.search(r'[A-Za-z]', t):
             return False
@@ -1278,7 +1522,9 @@ class AdeccoAustraliaJobScraper:
             'executive', 'director', 'lead', 'senior', 'junior', 'trainee', 'apprentice',
             'clerk', 'receptionist', 'administrator', 'secretary', 'accountant',
             'nurse', 'therapist', 'teacher', 'instructor', 'chef', 'waiter', 'barista',
-            'sales', 'marketing', 'hr', 'human resources', 'finance', 'accounting'
+            'sales', 'marketing', 'hr', 'human resources', 'finance', 'accounting',
+            'beater', 'mechanic', 'fitter', 'electrician', 'plumber', 'carpenter',
+            'associate', 'representative', 'agent', 'helper', 'worker', 'staff'
         ]
         
         # Valid if it has multiple words OR contains job-related keywords
@@ -1287,7 +1533,10 @@ class AdeccoAustraliaJobScraper:
             
         # Also accept single words that look like job titles (proper nouns or capitalized)
         if len(t.split()) == 1 and (t[0].isupper() or t.istitle()) and len(t) >= 3:
-            return True
+            # But not if it's a common website word
+            website_words = ['home', 'about', 'contact', 'help', 'support', 'blog', 'news']
+            if t.lower() not in website_words:
+                return True
             
         return False
 
@@ -1302,6 +1551,72 @@ class AdeccoAustraliaJobScraper:
         if any(s.lower() in l.lower() for s in states):
             return True
         return False
+
+    def _is_valid_description(self, desc: str) -> bool:
+        """Validate that description contains actual job content, not website elements."""
+        if not desc:
+            return False
+        
+        # More lenient length requirement - allow shorter descriptions
+        if len(desc.strip()) < 20:
+            return False
+        
+        desc_lower = desc.lower()
+        
+        # Only reject obvious privacy/cookie policy content (be more specific)
+        privacy_indicators = [
+            'these cookies may be set through our site by our advertising partners',
+            'build a profile of your interests and show you relevant adverts',
+            'privacy preference center',
+            'cookie policy - terms and conditions',
+            'gdpr compliance policy'
+        ]
+        
+        # Only reject if it's clearly privacy policy content (require longer matches)
+        for indicator in privacy_indicators:
+            if indicator in desc_lower:
+                return False
+        
+        # Check for obvious navigation/website content (be more specific)
+        website_indicators = [
+            'site navigation menu',
+            'main navigation breadcrumb',
+            'search results filter by sort by',
+            'page footer header menu',
+            'website navigation bar'
+        ]
+        
+        # Only reject if it's clearly website navigation (require longer matches)
+        for indicator in website_indicators:
+            if indicator in desc_lower:
+                return False
+        
+        # Accept if it contains ANY job-related content (be more permissive)
+        job_content_indicators = [
+            'role', 'position', 'responsible', 'duties', 'experience', 'skills',
+            'qualifications', 'requirements', 'join', 'team', 'client', 'seeking',
+            'opportunity', 'candidate', 'apply', 'we are looking', 'you will',
+            'partnering', 'recruit', 'industry', 'adecco is', 'our client is',
+            'job', 'work', 'employment', 'career', 'hiring', 'vacancy',
+            'trade', 'service', 'automotive', 'retail', 'manufacturing'
+        ]
+        
+        if any(indicator in desc_lower for indicator in job_content_indicators):
+            return True
+        
+        # If description is short but has professional content, accept it
+        if len(desc.strip()) < 100:
+            # For short descriptions, be more lenient
+            short_desc_indicators = [
+                'looking for', 'we are', 'seeking', 'required', 'needed',
+                'position available', 'opportunity', 'employment'
+            ]
+            if any(indicator in desc_lower for indicator in short_desc_indicators):
+                return True
+        
+        # If none of the above, still accept if it's not obviously invalid
+        # (This makes the validation more permissive)
+        return True
 
     def _clean_location_text(self, text: str) -> str:
         if not text:
@@ -1492,16 +1807,11 @@ class AdeccoAustraliaJobScraper:
                         total_pages = self._detect_total_pages(page)
                         logger.info(f"Total pages detected: {total_pages}")
                     
-                    # Find job elements - look for job listing containers
+                    # Find job elements - use the CORRECT selectors found from debugging
                     job_selectors = [
-                        'div:has-text("Temporary"):has-text(",")',           # Jobs with employment type
-                        'div:has-text("Permanent"):has-text(",")',           # Jobs with employment type
-                        'div:has-text("Casual"):has-text(",")',              # Jobs with employment type
-                        'div:has-text("Queensland")',                        # Jobs with location
-                        'div:has-text("NSW")',                               # Jobs with location  
-                        'div:has-text("Victoria")',                          # Jobs with location
-                        'div:has-text("Full Time")',                         # Jobs with work type
-                        'div:has-text("Part Time")',                         # Jobs with work type
+                        '.card',                                             # Primary: 10 job cards per page
+                        'article',                                           # Alternative: 10 article elements per page
+                        'div[class*="card"].mb2',                           # More specific card selector
                     ]
                     
                     # Prefer left-column card detection to avoid selecting the right panel
@@ -1559,7 +1869,7 @@ class AdeccoAustraliaJobScraper:
                         if job_data and self._is_valid_title(job_data.get('title', '')):
                             job_data_list.append(job_data)
                         else:
-                            logger.debug(f"Skipped invalid job data: {job_data}")
+                            logger.info(f"Skipped invalid job data on page {page_number}: {job_data.get('title', 'No title')} - {job_data}")
                         
                         # Small delay between extractions
                         time.sleep(random.uniform(0.1, 0.3))
@@ -1568,6 +1878,9 @@ class AdeccoAustraliaJobScraper:
                     for job_data in job_data_list:
                         if jobs_scraped >= self.max_jobs:
                             break
+                        
+                        # Initialize details to avoid reference errors
+                        details = {}
                         
                         # Get full job description if URL is available
                         if job_data.get('job_url'):
@@ -1590,17 +1903,47 @@ class AdeccoAustraliaJobScraper:
                             except Exception as e:
                                 logger.error(f"Failed to get description for {job_data['title']}: {e}")
                         
-                        # Validate we have a real, dynamic title and a reasonable location before saving
-                        if self._is_valid_title(job_data.get('title', '')):
+                        # Validate we have a real, dynamic title and reasonable content before saving
+                        is_valid_title = self._is_valid_title(job_data.get('title', ''))
+                        is_valid_desc = self._is_valid_description(job_data.get('description', ''))
+                        
+                        if is_valid_title:
                             # Clean/validate location - use extracted location if available
                             if not job_data.get('location') or not self._is_valid_location(job_data['location']):
                                 job_data['location'] = details.get('location', '') or job_data.get('location', '')
-                            if self._save_job_to_database_sync(job_data):
-                                jobs_scraped += 1
-                                self.scraped_jobs.append(job_data)
-                                logger.info(f"Saved job {jobs_scraped}/{self.max_jobs}: {job_data['title']}")
+                            
+                            # Save if we have a valid title and either:
+                            # 1. Valid description, OR
+                            # 2. Job title contains legitimate job keywords, OR 
+                            # 3. Job title is a category that typically contains multiple job types
+                            job_title_lower = job_data.get('title', '').lower()
+                            
+                            # Legitimate job keywords
+                            legitimate_keywords = [
+                                'manager', 'engineer', 'technician', 'operator', 'assistant', 'beater', 
+                                'electrician', 'plumber', 'sales', 'analyst', 'developer', 'designer',
+                                'associate', 'specialist', 'coordinator', 'supervisor', 'looking for'
+                            ]
+                            
+                            # Job category titles that are legitimate (even without detailed descriptions)
+                            job_categories = [
+                                'trades and services', 'automotive', 'aerospace', 'retail', 'wholesale',
+                                'e-commerce', 'manufacturing', 'transport', 'logistics', 'healthcare',
+                                'medical', 'construction', 'infrastructure', 'hospitality', 'events'
+                            ]
+                            
+                            has_legitimate_keyword = any(keyword in job_title_lower for keyword in legitimate_keywords)
+                            is_job_category = any(category in job_title_lower for category in job_categories)
+                            
+                            if is_valid_desc or has_legitimate_keyword or is_job_category:
+                                if self._save_job_to_database_sync(job_data):
+                                    jobs_scraped += 1
+                                    self.scraped_jobs.append(job_data)
+                                    logger.info(f"Saved job {jobs_scraped}/{self.max_jobs}: {job_data['title']}")
+                            else:
+                                logger.info(f"Skipping job with invalid description: {job_data.get('title', '')}")
                         else:
-                            logger.info("Skipping record without a reliable dynamic title")
+                            logger.info(f"Skipping job with invalid title: {job_data.get('title', '')}")
                         
                         # Add delay between operations
                         time.sleep(random.uniform(1.0, 2.0))
@@ -1618,14 +1961,17 @@ class AdeccoAustraliaJobScraper:
                                 logger.error("Page has been closed. Cannot navigate to next page.")
                                 break
                             
-                            # Try to find next page button
+                            # Try to find next page button - corrected based on actual HTML structure
                             next_selectors = [
-                                'a:has-text("Next")',
-                                'button:has-text("Next")',
-                                '[aria-label*="Next"]',
-                                'a[href*="pg="]:has-text("Next")',
-                                '.next',
-                                '[class*="next"]'
+                                'button[aria-label="Navigate next"]',                    # Primary: Navigate next arrow button
+                                'button[title="Navigate next"]',                        # Alternative: Same button with title
+                                '.paginator-icon[aria-label="Navigate next"]',          # More specific selector
+                                'button:has(span.material-icons:has-text("navigate_next"))',  # Button containing navigate_next icon
+                                'span.material-icons:has-text("navigate_next")',        # Direct icon selector
+                                '.paginator button[aria-label*="Navigate next"]',       # Within paginator container
+                                'button.paginator-page:last-of-type',                   # Last page number button as fallback
+                                'a:has-text("Next")',                                   # Legacy text-based (likely won't work)
+                                'button:has-text("Next")'                               # Legacy text-based (likely won't work)
                             ]
                             
                             next_button = None
@@ -1639,45 +1985,44 @@ class AdeccoAustraliaJobScraper:
                                     logger.debug(f"Error with selector {selector}: {e}")
                                     continue
                             
-                            if next_button:
-                                try:
-                                    # Get the href for manual navigation
-                                    href = next_button.get_attribute('href')
-                                    if href:
-                                        # Use direct navigation
-                                        if href.startswith('?'):
-                                            next_url = f"{self.jobs_url}{href}"
-                                        elif href.startswith('/'):
-                                            next_url = urljoin(self.base_url, href)
-                                        else:
-                                            next_url = href
-                                        
-                                        page.goto(next_url, wait_until='domcontentloaded', timeout=30000)
-                                        page_number += 1
-                                        time.sleep(random.uniform(2, 4))
-                                        logger.info(f"Successfully navigated to page {page_number}")
-                                    else:
-                                        # Fallback to click
-                                        next_button.click()
-                                        page.wait_for_load_state('domcontentloaded', timeout=30000)
-                                        page_number += 1
-                                        time.sleep(random.uniform(2, 4))
-                                        
-                                except Exception as nav_error:
-                                    logger.error(f"Navigation error: {nav_error}")
-                                    # Try direct URL construction as fallback
-                                    try:
-                                        fallback_url = f"{self.jobs_url}?pg={page_number + 1}"
-                                        logger.info(f"Trying fallback URL: {fallback_url}")
-                                        page.goto(fallback_url, wait_until='domcontentloaded', timeout=30000)
-                                        page_number += 1
-                                        time.sleep(random.uniform(2, 4))
-                                    except Exception as fallback_error:
-                                        logger.error(f"Fallback navigation failed: {fallback_error}")
-                                        break
-                            else:
-                                logger.info("No next page button found or reached job limit")
+                            # Use DIRECT URL navigation instead of clicking (more reliable)
+                            try:
+                                next_page_url = f"{self.jobs_url}?pg={page_number + 1}"
+                                logger.info(f"Navigating directly to page {page_number + 1}: {next_page_url}")
+                                
+                                page.goto(next_page_url, wait_until='networkidle', timeout=30000)
+                                time.sleep(3)  # Wait for content to fully load
+                                
+                                # Verify job cards loaded
+                                test_cards = page.query_selector_all('.card')
+                                if len(test_cards) >= 8:  # Should have ~10 cards
+                                    page_number += 1
+                                    logger.info(f"✅ Successfully navigated to page {page_number} - found {len(test_cards)} job cards")
+                                else:
+                                    logger.info(f"❌ Page {page_number + 1} has insufficient job cards ({len(test_cards)}). End of pagination.")
+                                    break
+                                
+                            except Exception as nav_error:
+                                logger.error(f"Direct navigation failed: {nav_error}")
                                 break
+                            else:
+                                # If no next button found, try direct navigation anyway
+                                try:
+                                    next_page_url = f"{self.jobs_url}?pg={page_number + 1}"
+                                    logger.info(f"No next button found. Trying direct navigation to: {next_page_url}")
+                                    page.goto(next_page_url, wait_until='networkidle', timeout=30000)
+                                    time.sleep(3)
+                                    
+                                    test_cards = page.query_selector_all('.card')
+                                    if len(test_cards) >= 8:
+                                        page_number += 1
+                                        logger.info(f"✅ Direct navigation successful - found {len(test_cards)} job cards")
+                                    else:
+                                        logger.info("No more job cards found. End of pagination.")
+                                        break
+                                except:
+                                    logger.info("Direct navigation failed. End of pagination.")
+                                    break
                                 
                         except Exception as e:
                             logger.error(f"Error during page navigation: {e}")

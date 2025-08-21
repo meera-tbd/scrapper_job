@@ -84,7 +84,8 @@ class ProspleAustraliaScraper:
         self.base_url = "https://au.prosple.com"
         self.search_url = "https://au.prosple.com/search-jobs"
         self.search_url_with_location = "https://au.prosple.com/search-jobs?keywords=&locations=9692&defaults_applied=1"
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        # Updated user agent to latest Chrome version
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
         
         # Statistics
         self.stats = {
@@ -276,6 +277,175 @@ class ProspleAustraliaScraper:
             
         return location
 
+    def extract_job_ids_from_analytics(self, api_requests):
+        """Extract job IDs from analytics requests"""
+        try:
+            logger.info("Attempting to extract job IDs from analytics data...")
+            
+            job_ids = []
+            for request in api_requests:
+                if 'analytics.google.com' in request and 'content_list=' in request:
+                    logger.info(f"Found analytics request with content_list: {request[:200]}...")
+                    
+                    # Look for content_list in the URL directly
+                    if 'ep.content_list=' in request:
+                        # Extract content_list value
+                        start = request.find('ep.content_list=') + len('ep.content_list=')
+                        end = request.find('&', start)
+                        if end == -1:
+                            end = len(request)
+                        
+                        content_list = request[start:end]
+                        
+                        # Split the content list into individual job IDs (URL encoded comma %2C)
+                        ids = content_list.split('%2C')
+                        for job_id in ids:
+                            job_id = job_id.strip()
+                            if job_id.isdigit():
+                                job_ids.append(job_id)
+                        
+                        logger.info(f"Found {len(ids)} job IDs in analytics: {ids[:5]}...")
+                        break
+            
+            # Remove duplicates and return
+            unique_ids = list(set(job_ids))
+            logger.info(f"Extracted {len(unique_ids)} unique job IDs from analytics")
+            return unique_ids
+            
+        except Exception as e:
+            logger.error(f"Error extracting job IDs from analytics: {e}")
+            return []
+
+    def fetch_job_data_from_api(self, job_ids, page):
+        """Fetch job data using the GraphQL API"""
+        try:
+            logger.info(f"Attempting to fetch job data for {len(job_ids)} jobs from API...")
+            
+            jobs = []
+            for job_id in job_ids[:self.max_jobs if self.max_jobs else len(job_ids)]:
+                try:
+                    # Construct individual job URL - try different patterns
+                    possible_urls = [
+                        f"https://au.prosple.com/opportunities/{job_id}",
+                        f"https://au.prosple.com/jobs/{job_id}",
+                        f"https://au.prosple.com/career-opportunities/{job_id}",
+                        f"https://au.prosple.com/graduate-opportunities/{job_id}"
+                    ]
+                    
+                    for job_url in possible_urls:
+                        try:
+                            logger.info(f"Trying job URL: {job_url}")
+                            response = page.goto(job_url, timeout=30000, wait_until='networkidle')
+                            
+                            if response and response.status == 200:
+                                # Extract job details from the page
+                                job_details = self.get_job_details(job_url, page)
+                                
+                                # Get basic job info
+                                title_element = page.query_selector('h1, h2, [data-testid="job-title"]')
+                                title = title_element.inner_text().strip() if title_element else f"Job {job_id}"
+                                
+                                if title and len(title) > 2:
+                                    job_data = {
+                                        'title': title,
+                                        'url': job_url,
+                                        'id': job_id
+                                    }
+                                    jobs.append(job_data)
+                                    logger.info(f"Successfully extracted job: {title}")
+                                    break
+                                    
+                        except Exception as e:
+                            logger.debug(f"URL {job_url} failed: {e}")
+                            continue
+                    
+                    # Add delay between requests
+                    self.human_delay(2, 4)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing job ID {job_id}: {e}")
+                    continue
+            
+            logger.info(f"Successfully extracted {len(jobs)} jobs from API")
+            return jobs
+            
+        except Exception as e:
+            logger.error(f"Error fetching job data from API: {e}")
+            return []
+
+    def extract_jobs_from_api_response(self, api_data):
+        """Extract job data from GraphQL API response"""
+        try:
+            jobs = []
+            logger.info(f"Starting API response extraction. Data type: {type(api_data)}")
+            
+            # Handle both list and dict API response structures
+            opportunities = None
+            
+            if isinstance(api_data, list):
+                # Direct list of opportunities (GraphQL API response)
+                opportunities = api_data
+                logger.info(f"API response is a direct list with {len(opportunities)} items")
+            elif isinstance(api_data, dict):
+                # Try different possible paths for the opportunities
+                # Common GraphQL response paths
+                possible_paths = [
+                    ['data', 'searchOpportunities', 'results'],
+                    ['data', 'searchOpportunities', 'opportunities'],
+                    ['data', 'opportunities'],
+                    ['searchOpportunities', 'results'],
+                    ['opportunities'],
+                    ['results']
+                ]
+                
+                for path in possible_paths:
+                    try:
+                        temp_data = api_data
+                        for key in path:
+                            temp_data = temp_data[key]
+                        if isinstance(temp_data, list) and len(temp_data) > 0:
+                            opportunities = temp_data
+                            logger.info(f"Found opportunities using path: {' -> '.join(path)}")
+                            break
+                    except (KeyError, TypeError):
+                        continue
+            
+            if opportunities:
+                logger.info(f"Found {len(opportunities)} opportunities in API response")
+                
+                # Process each opportunity using the same logic as Next.js extraction
+                for opp in opportunities:
+                    try:
+                        job_data = self.extract_job_from_nextjs_opportunity(opp, {}, None)  # No apollo_state for API responses
+                        if job_data:
+                            jobs.append(job_data)
+                            logger.info(f"Successfully extracted API job: {job_data.get('title', 'Unknown')} at {job_data.get('company', 'Unknown')}")
+                    except Exception as e:
+                        logger.info(f"Error processing API opportunity: {e}")
+                        continue
+            else:
+                logger.warning("Could not find opportunities in API response")
+                logger.info(f"API response keys: {list(api_data.keys()) if isinstance(api_data, dict) else 'Not a dict'}")
+                # Print a sample of the API response structure for debugging
+                if isinstance(api_data, dict):
+                    import json
+                    try:
+                        # Try to pretty print the structure for better debugging
+                        logger.info(f"API response structure:\n{json.dumps(api_data, indent=2)[:1000]}...")
+                    except:
+                        logger.info(f"API response sample structure: {str(api_data)[:1000]}...")
+                elif isinstance(api_data, list):
+                    logger.info(f"API response is a list with {len(api_data)} items")
+                    if len(api_data) > 0:
+                        logger.info(f"First item sample: {str(api_data[0])[:500]}...")
+            
+            logger.info(f"API extraction completed. Found {len(jobs)} jobs")
+            return jobs
+            
+        except Exception as e:
+            logger.warning(f"Error extracting jobs from API response: {e}")
+            return []
+
     def extract_jobs_from_nextjs_data(self, page):
         """Extract job data from Next.js __NEXT_DATA__ script tag"""
         try:
@@ -290,56 +460,203 @@ class ProspleAustraliaScraper:
             # Parse the JSON data
             json_content = next_data_script.inner_text()
             data = json.loads(json_content)
+            logger.info("Successfully parsed Next.js JSON data")
             
-            # Navigate through the data structure to find jobs
+            # Extract jobs from the correct path: props.pageProps.initialResult.opportunities
             jobs = []
             
-            # Common paths where job data might be stored in Next.js apps
-            possible_paths = [
-                ['props', 'pageProps', 'jobs'],
-                ['props', 'pageProps', 'data', 'jobs'],
-                ['props', 'pageProps', 'initialData', 'jobs'],
-                ['props', 'data', 'jobs'],
-                ['props', 'jobs'],
-                ['props', 'pageProps', 'results'],
-                ['props', 'pageProps', 'data', 'results'],
-                ['props', 'pageProps', 'opportunities'],
-                ['props', 'pageProps', 'data', 'opportunities']
-            ]
+            try:
+                opportunities = data['props']['pageProps']['initialResult']['opportunities']
+                apollo_state = data['props']['pageProps']['initialApolloState']
+                logger.info(f"Found {len(opportunities)} opportunities in Next.js data")
+                
+                def resolve_ref(ref_obj, apollo_state):
+                    """Resolve Apollo references"""
+                    if isinstance(ref_obj, dict) and '__ref' in ref_obj:
+                        ref_key = ref_obj['__ref']
+                        return apollo_state.get(ref_key, {})
+                    return ref_obj
+                
+                for opp in opportunities:
+                    try:
+                        job_data = self.extract_job_from_nextjs_opportunity(opp, apollo_state, resolve_ref)
+                        if job_data:
+                            jobs.append(job_data)
+                            logger.info(f"SUCCESS: Extracted job: {job_data['title']} at {job_data['company']}")
+                    except Exception as e:
+                        logger.warning(f"Failed to extract job from opportunity: {e}")
+                        continue
             
-            for path in possible_paths:
-                try:
-                    current = data
-                    for key in path:
-                        if isinstance(current, dict) and key in current:
-                            current = current[key]
-                        else:
-                            break
-                    else:
-                        # Successfully navigated the full path
-                        if isinstance(current, list) and current:
-                            logger.info(f"Found job data at path: {' -> '.join(path)}")
-                            jobs = current
-                            break
-                except Exception as e:
-                    continue
-            
-            # If no jobs found in standard paths, search recursively
-            if not jobs:
-                logger.info("Searching for job data recursively...")
-                jobs = self.find_jobs_recursive(data)
-            
-            if jobs:
-                logger.info(f"Found {len(jobs)} jobs in Next.js data")
-                logger.info(f"Sample job data: {jobs[0] if jobs else 'None'}")
-                return self.parse_nextjs_jobs(jobs)
-            else:
-                logger.warning("No job data found in Next.js data structure")
+            except KeyError as e:
+                logger.error(f"Expected data structure not found: {e}")
                 return []
+            
+            return jobs
                 
         except Exception as e:
-            logger.error(f"Error extracting jobs from Next.js data: {e}")
+            logger.error(f"Error extracting from Next.js data: {e}")
             return []
+    
+    def extract_job_from_nextjs_opportunity(self, opp, apollo_state, resolve_ref):
+        """Extract job data from a single Next.js opportunity object"""
+        try:
+            job_data = {
+                'title': opp.get('title', 'Unknown Title'),
+                'company': 'Unknown Company',
+                'location': opp.get('locationDescription', 'Unknown Location'),
+                'url': None,
+                'salary_min': None,
+                'salary_max': None,
+                'salary_currency': 'AUD',
+                'description': opp.get('description', ''),
+                'application_deadline': opp.get('applicationsCloseDate', ''),
+                'job_type': 'Unknown',
+                'remote_available': opp.get('remoteAvailable', False),
+                'sponsored': opp.get('sponsored', False),
+                'min_vacancies': opp.get('minNumberVacancies'),
+                'max_vacancies': opp.get('maxNumberVacancies')
+            }
+            
+            # Get job ID
+            job_id = opp.get('id')
+            
+            # Construct URL using the correct detailPageURL format
+            detail_page_url = opp.get('detailPageURL')
+            if detail_page_url:
+                job_data['url'] = f"https://au.prosple.com{detail_page_url}"
+            elif job_id:
+                # Fallback to old format (though it may not work)
+                job_data['url'] = f"https://au.prosple.com/graduate-opportunities/{job_id}"
+            
+            # Extract external application URL
+            apply_by_url = opp.get('applyByUrl')
+            if apply_by_url:
+                job_data['external_url'] = apply_by_url
+            
+            # Extract employer/company
+            if 'parentEmployer' in opp:
+                employer_ref = opp['parentEmployer']
+                
+                # Check if employer data is embedded directly in the job
+                if isinstance(employer_ref, dict):
+                    # Look for company name in different possible fields
+                    company_name = None
+                    for field in ['title', 'advertiserName', 'name']:
+                        if field in employer_ref:
+                            company_name = employer_ref[field]
+                            break
+                    
+                    if company_name:
+                        job_data['company'] = company_name
+                    elif '__ref' in employer_ref:
+                        # Try to resolve the reference
+                        employer_key = employer_ref['__ref']
+                        employer = apollo_state.get(employer_key, {})
+                        if employer:
+                            for field in ['title', 'advertiserName', 'name']:
+                                if field in employer:
+                                    job_data['company'] = employer[field]
+                                    break
+                elif isinstance(employer_ref, str):
+                    # Direct employer key reference
+                    employer_key = employer_ref if employer_ref.startswith('Employer:') else f"Employer:{employer_ref}"
+                    employer = apollo_state.get(employer_key, {})
+                    if employer:
+                        for field in ['title', 'advertiserName', 'name']:
+                            if field in employer:
+                                job_data['company'] = employer[field]
+                                break
+            
+            # Extract salary information
+            if 'salary' in opp and opp['salary']:
+                salary = opp['salary']
+                if isinstance(salary, dict):
+                    salary_range = salary.get('range', {})
+                    if salary_range:
+                        job_data['salary_min'] = salary_range.get('minimum')
+                        job_data['salary_max'] = salary_range.get('maximum')
+                    
+                    # Get currency
+                    currency = resolve_ref(salary.get('currency', {}), apollo_state)
+                    if isinstance(currency, dict):
+                        job_data['salary_currency'] = currency.get('label', 'AUD')
+                    else:
+                        job_data['salary_currency'] = 'AUD'
+            
+            # Extract locations from physicalLocations
+            if 'physicalLocations' in opp:
+                locations = []
+                for loc_data in opp['physicalLocations']:
+                    if isinstance(loc_data, dict) and 'children' in loc_data:
+                        # Navigate through nested location structure
+                        for state in loc_data.get('children', []):
+                            for city in state.get('children', []):
+                                locations.append(city.get('label', ''))
+                if locations:
+                    job_data['location'] = ', '.join(filter(None, locations))
+            
+            # Extract job type from opportunityTypes
+            if 'opportunityTypes' in opp:
+                for opp_type in opp['opportunityTypes']:
+                    opp_type_resolved = resolve_ref(opp_type, apollo_state)
+                    if opp_type_resolved.get('name'):
+                        job_data['job_type'] = opp_type_resolved['name']
+                        break
+            
+            # Log what we extracted for debugging
+            logger.debug(f"Extracted job data: Title='{job_data['title']}', Company='{job_data['company']}', Location='{job_data['location']}', Salary={job_data['salary_min']}-{job_data['salary_max']} {job_data['salary_currency']}")
+            
+            return job_data
+            
+        except Exception as e:
+            logger.error(f"Error extracting job from opportunity: {e}")
+            return None
+    
+    def process_nextjs_jobs(self, nextjs_jobs, page=None):
+        """Process and save jobs extracted from Next.js data"""
+        try:
+            logger.info(f"Processing {len(nextjs_jobs)} complete jobs from Next.js...")
+            
+            # Limit to max_jobs if specified
+            jobs_to_process = nextjs_jobs[:self.max_jobs] if self.max_jobs else nextjs_jobs
+            
+            for i, job_data in enumerate(jobs_to_process, 1):
+                try:
+                    logger.info(f"Processing job {i}/{len(jobs_to_process)}: '{job_data['title']}' at {job_data['company']}")
+                    logger.info(f"   Location: {job_data['location']}")
+                    if job_data['salary_min'] and job_data['salary_max']:
+                        logger.info(f"   Salary: {job_data['salary_currency']} {job_data['salary_min']:,} - {job_data['salary_max']:,}")
+                    
+                    # Update stats
+                    if 'processed' not in self.stats:
+                        self.stats['processed'] = 0
+                    self.stats['processed'] += 1
+                    
+                    # Save to database with page context for detailed extraction
+                    if self.save_job_from_data(job_data, page):
+                        if 'saved' not in self.stats:
+                            self.stats['saved'] = 0
+                        self.stats['saved'] += 1
+                        logger.info(f"SUCCESS: Saved complete job: {job_data['title']} at {job_data['company']}")
+                    else:
+                        if 'duplicates' not in self.stats:
+                            self.stats['duplicates'] = 0
+                        self.stats['duplicates'] += 1
+                        logger.info(f"DUPLICATE: {job_data['title']} at {job_data['company']}")
+                        
+                    self.human_delay(1, 2)  # Short delay between jobs
+                    
+                except Exception as e:
+                    logger.error(f"Error processing job data: {e}")
+                    if 'errors' not in self.stats:
+                        self.stats['errors'] = 0
+                    self.stats['errors'] += 1
+            
+            logger.info(f"SUCCESS: Next.js extraction completed - processed {len(jobs_to_process)} jobs with complete data")
+            
+        except Exception as e:
+            logger.error(f"Error processing Next.js jobs: {e}")
+            raise
 
     def find_jobs_recursive(self, data, max_depth=5, current_depth=0):
         """Recursively search for job data in the JSON structure"""
@@ -434,11 +751,11 @@ class ProspleAustraliaScraper:
         try:
             job_data = {}
             
-            # Extract job title and URL using generic selectors (no hardcoded URLs)
-            title_element = job_element.query_selector('h2 a, h1 a, h3 a, a[href*="/job"], a[href*="/career"], a[href*="/position"]')
+            # Extract job title and URL using current website structure
+            title_element = job_element.query_selector('h2 a, h1 a, h3 a, a[href*="/graduate-opportunities/"], a[href*="/opportunities/"], a[href*="/job"], a[href*="/career"], a[href*="/position"]')
             if not title_element:
-                # Additional fallback selectors  
-                title_element = job_element.query_selector('a[target="_blank"], section a, div a, a:first-of-type')
+                # Additional fallback selectors for current structure
+                title_element = job_element.query_selector('a[target="_blank"], section a, div a, a:first-of-type, [role="button"] a')
             
             if title_element:
                 job_data['title'] = title_element.inner_text().strip()
@@ -463,6 +780,34 @@ class ProspleAustraliaScraper:
             
         except Exception as e:
             logger.error(f"Error extracting job data: {e}")
+            return None
+
+    def get_job_details_quick(self, job_url, job_id):
+        """Get job details quickly using job ID"""
+        try:
+            logger.info(f"Getting details for job ID: {job_id}")
+            
+            # Return basic job details based on ID
+            job_details = {
+                'title': f'Job Opportunity {job_id}',  # Will be updated if we find real title
+                'company': 'Unknown Company',
+                'location': 'Australia',
+                'url': job_url,
+                'salary_min': None,
+                'salary_max': None,
+                'job_type': 'full_time',
+                'description': f'Job listing from Prosple Australia - ID: {job_id}',
+                'requirements': '',
+                'benefits': '',
+                'posted_ago': '',
+                'application_deadline': ''
+            }
+            
+            # Try to get more details by checking analytics data
+            return job_details
+            
+        except Exception as e:
+            logger.error(f"Error getting job details for {job_id}: {e}")
             return None
 
     def get_job_details(self, job_url, page):
@@ -773,42 +1118,127 @@ class ProspleAustraliaScraper:
         """Save job to database from JSON data with proper error handling"""
         try:
             with transaction.atomic():
-                # Check for duplicates
+                # Enhanced duplicate detection using multiple fields
                 if not job_data.get('url'):
                     logger.warning(f"No URL for job: {job_data.get('title', 'Unknown')}")
                     return False
-                    
+                
+                # Check for duplicates by URL first
+                logger.info(f"CHECKING FOR DUPLICATE with URL: {job_data['url']}")
                 existing_job = JobPosting.objects.filter(external_url=job_data['url']).first()
                 if existing_job:
-                    logger.info(f"Duplicate job found: {job_data['title']}")
+                    logger.info(f"DUPLICATE FOUND - Job exists in database: {existing_job.title} (ID: {existing_job.id})")
+                    logger.info(f"   Existing URL: {existing_job.external_url}")
+                    logger.info(f"   Scraped at: {existing_job.scraped_at}")
                     self.stats['duplicate_jobs'] += 1
                     return False
-                
-                # Get detailed job information from the individual job page if URL is available
-                if job_data['url']:
-                    job_details = self.get_job_details(job_data['url'], page)
                 else:
-                    # Use data from JSON with fallbacks
+                    logger.info(f"NO DUPLICATE FOUND - Job is new!")
+                
+                # Additional duplicate check by title + company
+                if job_data.get('title') and job_data.get('company'):
+                    logger.info(f"SECONDARY CHECK - Title+Company: '{job_data['title']}' at '{job_data['company']}'")
+                    existing_job_by_title = JobPosting.objects.filter(
+                        title__iexact=job_data['title'],
+                        company__name__iexact=job_data['company'],
+                        external_source='prosple.com.au'
+                    ).first()
+                    if existing_job_by_title:
+                        logger.info(f"DUPLICATE FOUND by Title+Company: {existing_job_by_title.title} (ID: {existing_job_by_title.id})")
+                        logger.info(f"   Company: {existing_job_by_title.company.name}")
+                        logger.info(f"   External Source: {existing_job_by_title.external_source}")
+                        self.stats['duplicate_jobs'] += 1
+                        return False
+                    else:
+                        logger.info(f"NO TITLE+COMPANY DUPLICATE - Job is new!")
+                
+                # Extract detailed job information from the individual job page
+                job_details = None
+                if job_data.get('url'):
+                    try:
+                        # Always use the existing page to avoid async/sync conflicts
+                        if page is not None:
+                            job_details = self.get_job_details(job_data['url'], page)
+                        if job_details:
+                            logger.info(f"✅ EXTRACTED FULL DETAILS from detail page for: {job_data['title']}")
+                        else:
+                            logger.warning("No page context available for detailed extraction")
+                            job_details = None
+                        
+                    except Exception as e:
+                        logger.warning(f"Error getting job details from page: {e}")
+                        job_details = None
+                
+                # If job_details extraction failed, use JSON data as fallback
+                if not job_details:
+                    logger.info(f"Using Next.js JSON data as fallback for: {job_data['title']}")
                     job_details = {
-                        'description': f"Graduate opportunity: {job_data.get('title', 'Position')} at {job_data.get('company', 'Unknown Company')}. For full details, visit Prosple Australia.",
+                        'description': job_data.get('description', ''),
                         'company': job_data.get('company', 'Unknown Company'),
                         'location': job_data.get('location', 'Australia'),
-                        'salary_min': None,
-                        'salary_max': None,
+                        'salary_min': job_data.get('salary_min'),
+                        'salary_max': job_data.get('salary_max'),
                         'salary_type': 'yearly',
-                        'salary_raw_text': job_data.get('salary', ''),
-                        'job_type': job_data.get('job_type', 'full_time'),
+                        'salary_raw_text': '',
+                        'job_type': job_data.get('job_type', 'graduate'),
                         'closing_date': None,
                         'industry': '',
                         'job_level': 'graduate'
                     }
+                else:
+                    # Use data from detail page but supplement with Next.js data where needed
+                    if not job_details.get('company') or job_details['company'] == 'Unknown Company':
+                        job_details['company'] = job_data.get('company', 'Unknown Company')
+                    if not job_details.get('location') or job_details['location'] == 'Australia':
+                        job_details['location'] = job_data.get('location', 'Australia')
+                    if not job_details.get('salary_min') and job_data.get('salary_min'):
+                        job_details['salary_min'] = job_data.get('salary_min')
+                        job_details['salary_max'] = job_data.get('salary_max')
+                    if not job_details.get('job_type') or job_details['job_type'] == 'full_time':
+                        # Try to get job type from Next.js data if detail page didn't find it
+                        if job_data.get('job_type'):
+                            job_details['job_type'] = job_data.get('job_type')
+                        else:
+                            job_details['job_type'] = 'graduate'  # Default for prosple
+                
+                # Build salary raw text from min/max if available
+                if job_data.get('salary_min') and job_data.get('salary_max'):
+                    currency = job_data.get('salary_currency', 'AUD')
+                    job_details['salary_raw_text'] = f"{currency} {job_data['salary_min']:,} - {job_data['salary_max']:,}"
+                
+                # Enhanced description handling - prefer detail page description over JSON data
+                if job_details.get('description') and len(job_details['description']) > 200:
+                    # We got a good description from the detail page, keep it
+                    logger.info(f"Using full description from detail page ({len(job_details['description'])} chars)")
+                else:
+                    # Build enhanced description from available data
+                    description_parts = []
+                    if job_data.get('description') and len(job_data.get('description', '')) > 50:
+                        description_parts.append(job_data['description'])
+                    else:
+                        # Build description from available data
+                        description_parts.append(f"Position: {job_data.get('title', 'Graduate Position')}")
+                        description_parts.append(f"Company: {job_data.get('company', 'Unknown Company')}")
+                        description_parts.append(f"Location: {job_data.get('location', 'Australia')}")
+                        
+                        if job_details.get('salary_raw_text'):
+                            description_parts.append(f"Salary: {job_details['salary_raw_text']}")
+                        
+                        if job_data.get('application_deadline'):
+                            description_parts.append(f"Application Deadline: {job_data['application_deadline']}")
+                        
+                        if job_data.get('remote_available'):
+                            description_parts.append("Remote work available")
+                        
+                        description_parts.append("This is a graduate and professional opportunity posted on Prosple Australia.")
+                        description_parts.append(f"For full job details, visit: {job_data.get('url', 'https://au.prosple.com')}")
                     
-                    # Extract salary info if available
-                    if job_data.get('salary'):
-                        salary_min, salary_max, salary_type, _ = self.extract_salary_info(job_data['salary'])
-                        job_details['salary_min'] = salary_min
-                        job_details['salary_max'] = salary_max
-                        job_details['salary_type'] = salary_type
+                    job_details['description'] = '\n'.join(description_parts)
+                    logger.info(f"Built fallback description ({len(job_details['description'])} chars)")
+                
+                # Parse closing date if available
+                if job_data.get('application_deadline'):
+                    job_details['closing_date'] = self.parse_closing_date(job_data['application_deadline'])
                 
                 # Get or create company
                 company = self.get_or_create_company(job_details['company'])
@@ -916,31 +1346,361 @@ class ProspleAustraliaScraper:
         logger.info("Starting Prosple Australia job scraping...")
         
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=self.headless)
-            context = browser.new_context(user_agent=self.user_agent)
+            # Launch browser with additional stealth options
+            browser = playwright.chromium.launch(
+                headless=self.headless,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding'
+                ]
+            )
+            
+            # Create context with realistic browser settings
+            context = browser.new_context(
+                user_agent=self.user_agent,
+                viewport={'width': 1366, 'height': 768},
+                screen={'width': 1366, 'height': 768},
+                locale='en-AU',
+                timezone_id='Australia/Sydney',
+                geolocation={'longitude': 151.2093, 'latitude': -33.8688},  # Sydney coordinates
+                permissions=['geolocation']
+            )
+            
             page = context.new_page()
+            
+            # Add stealth JavaScript to avoid detection
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+                
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5],
+                });
+                
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-AU', 'en'],
+                });
+                
+                window.chrome = {
+                    runtime: {},
+                };
+            """)
             
             # Track network requests to find API calls
             api_requests = []
+            graphql_requests = []
+            pagination_responses = []  # Store GraphQL responses containing job data
+            
             def handle_request(request):
-                if any(keyword in request.url.lower() for keyword in ['job', 'search', 'api', 'opportunity']):
+                url = request.url.lower()
+                if any(keyword in url for keyword in ['job', 'search', 'api', 'opportunity']):
                     api_requests.append(request.url)
                     logger.info(f"Captured relevant request: {request.url}")
+                
+                # Specifically track GraphQL requests
+                if 'graphql' in url or 'internal' in url or request.method == 'POST':
+                    graphql_requests.append({
+                        'url': request.url,
+                        'method': request.method,
+                        'headers': dict(request.headers),
+                        'post_data': request.post_data
+                    })
+                    logger.info(f"Captured GraphQL/API request: {request.url}")
+            
+            def handle_response(response):
+                url = response.url.lower()
+                if ('job' in url or 'search' in url or 'api' in url or 
+                    'graphql' in url or 'internal' in url):
+                    try:
+                        # Try to capture response data for analysis
+                        if response.status == 200:
+                            logger.info(f"Successful response from: {response.url}")
+                            
+                            # For GraphQL responses with job data, capture the response
+                            if ('internal' in url and response.request.method == 'POST'):
+                                try:
+                                    response_data = response.json()
+                                    pagination_responses.append({
+                                        'url': response.url,
+                                        'data': response_data,
+                                        'timestamp': time.time()
+                                    })
+                                    logger.info("Captured pagination API response with job data")
+                                except Exception as json_error:
+                                    logger.debug(f"Could not parse GraphQL response as JSON: {json_error}")
+                                    logger.info("Found potential job data API response")
+                    except Exception as e:
+                        logger.debug(f"Error handling response: {e}")
             
             page.on("request", handle_request)
+            page.on("response", handle_response)
             
             try:
-                # Navigate to the jobs page
+                # Navigate to the jobs page with shorter timeout to get analytics data
                 logger.info(f"Navigating to: {self.search_url}")
-                page.goto(self.search_url)
-                self.human_delay(3, 5)
+                try:
+                    page.goto(self.search_url, timeout=30000, wait_until='domcontentloaded')
+                    self.human_delay(5, 8)
+                    
+                    # Wait for basic page structure
+                    page.wait_for_selector('body', timeout=10000)
+                    logger.info("Page body loaded, extracting Next.js data immediately...")
+                    
+                    # Extract jobs from multiple pages using pagination
+                    logger.info("Starting pagination-aware job extraction...")
+                    all_jobs = []
+                    current_page = 1
+                    max_pages = 10  # Allow more pages to get sufficient jobs for larger requests
+                    
+                    while len(all_jobs) < (self.max_jobs or 1000) and current_page <= max_pages:
+                        logger.info(f"Extracting jobs from page {current_page}...")
+                        
+                        # Extract Next.js data from current page (every page has same UI structure)
+                        nextjs_jobs = self.extract_jobs_from_nextjs_data(page)
+                        if nextjs_jobs:
+                            logger.info(f"Found {len(nextjs_jobs)} jobs on page {current_page} (from Next.js data)")
+                            all_jobs.extend(nextjs_jobs)
+                        else:
+                            logger.warning(f"No jobs found in Next.js data for page {current_page}")
+                            # If no Next.js data found, this page might be empty or we reached the end
+                            break
+                                    
+                        # Check if we extracted any jobs at all
+                        if current_page == 1 and len(all_jobs) == 0:
+                            logger.error("No jobs found on first page - stopping")
+                            break
+                        
+                        # Check if we have enough jobs
+                        if self.max_jobs and len(all_jobs) >= self.max_jobs:
+                            logger.info(f"Reached job limit of {self.max_jobs}, stopping pagination")
+                            break
+                            
+                        # Only proceed with pagination if we have jobs
+                        if len(all_jobs) > 0:
+                                
+                            # Try to navigate to next page
+                            try:
+                                # Multiple strategies to find pagination elements
+                                next_button = None
+                                next_page_num = current_page + 1
+                                
+                                # Strategy 1: Use exact selectors from the actual Prosple HTML structure
+                                pagination_selectors = [
+                                    # Exact selectors from the provided HTML
+                                    'button[aria-label="Goto next page"]',
+                                    f'button[aria-label="Goto Page {next_page_num}"]',
+                                    'nav[aria-label="Pagination Navigation"] button[aria-label*="next" i]',
+                                    'nav[aria-label="Pagination Navigation"] button:has(svg)',
+                                    '.sc-dff9ec26-2.eYRdpA',  # Next button class
+                                    f'.sc-dff9ec26-2.jSaIns:has-text("{next_page_num}")',  # Page number button class
+                                    
+                                    # Fallback selectors
+                                    f'button:has-text("{next_page_num}")',
+                                    f'a:has-text("{next_page_num}")',
+                                    'button[aria-label*="Goto next" i]',
+                                    'button[aria-label*="Go to next" i]',
+                                    'button[aria-label*="next page" i]',
+                                    f'button[aria-label*="Goto Page {next_page_num}" i]',
+                                    f'button[aria-label*="Go to Page {next_page_num}" i]',
+                                    
+                                    # Generic navigation selectors
+                                    'nav[role="navigation"] button[aria-label*="next" i]',
+                                    '[class*="pagination"] button[aria-label*="next" i]',
+                                    'button:has(svg) >> css=nav[aria-label*="Pagination"]',
+                                ]
+                                
+                                for selector in pagination_selectors:
+                                    try:
+                                        # Try to find a single button first
+                                        single_button = page.query_selector(selector)
+                                        if single_button and single_button.is_visible() and single_button.is_enabled():
+                                            # For aria-label based selectors, we can trust them directly
+                                            if 'aria-label' in selector:
+                                                next_button = single_button
+                                                logger.info(f"Found pagination button using aria-label selector: {selector}")
+                                                break
+                                            
+                                            # For other selectors, check content
+                                            text_content = single_button.text_content() or ""
+                                            aria_label = single_button.get_attribute('aria-label') or ""
+                                            
+                                            if (str(next_page_num) in text_content or 
+                                                "next" in text_content.lower() or
+                                                "next" in aria_label.lower() or
+                                                f"Page {next_page_num}" in aria_label):
+                                                next_button = single_button
+                                                logger.info(f"Found pagination button using selector: {selector}")
+                                                break
+                                        
+                                        # Fallback to multiple button search
+                                        potential_buttons = page.query_selector_all(selector)
+                                        for btn in potential_buttons:
+                                            if btn.is_visible() and btn.is_enabled():
+                                                text_content = btn.text_content() or ""
+                                                aria_label = btn.get_attribute('aria-label') or ""
+                                                
+                                                if (str(next_page_num) in text_content or 
+                                                    "next" in text_content.lower() or
+                                                    "next" in aria_label.lower() or
+                                                    f"Page {next_page_num}" in aria_label):
+                                                    next_button = btn
+                                                    logger.info(f"Found pagination button from list using selector: {selector}")
+                                                    break
+                                        
+                                        if next_button:
+                                            break
+                                    except Exception as e:
+                                        logger.debug(f"Selector {selector} failed: {e}")
+                                        continue
+                                
+                                if next_button:
+                                    logger.info(f"Found pagination button for page {next_page_num}")
+                                    
+                                    # Scroll to button to ensure it's visible
+                                    next_button.scroll_into_view_if_needed()
+                                    time.sleep(1)
+                                    
+                                    # Try different click methods
+                                    try:
+                                        # First try: force click to bypass intercepting elements
+                                        next_button.click(force=True)
+                                    except:
+                                        try:
+                                            # Second try: JavaScript click
+                                            page.evaluate('element => element.click()', next_button)
+                                        except:
+                                            # Third try: dispatch click event
+                                            next_button.dispatch_event('click')
+                                    
+                                    logger.info(f"Successfully clicked to navigate to page {next_page_num}")
+                                    
+                                    # Wait for page to load and verify navigation
+                                    try:
+                                        # Wait for network to settle
+                                        page.wait_for_load_state('networkidle', timeout=20000)
+                                        time.sleep(2)
+                                        
+                                        # Verify we're on the new page by checking the current page indicator
+                                        try:
+                                            current_page_indicator = page.query_selector(f'button[aria-label="Current Page, Page {next_page_num}"]')
+                                            if current_page_indicator:
+                                                logger.info(f"Successfully navigated to page {next_page_num}")
+                                                current_page = next_page_num
+                                            else:
+                                                # Alternative verification - check if page 1 is no longer current
+                                                page_1_current = page.query_selector('button[aria-label="Current Page, Page 1"]')
+                                                if not page_1_current:
+                                                    logger.info(f"Successfully navigated away from page 1")
+                                                    current_page = next_page_num
+                                                else:
+                                                    logger.warning("Page navigation may have failed - still on page 1")
+                                                    break
+                                        except Exception as e:
+                                            logger.warning(f"Could not verify page navigation: {e}")
+                                            # Assume success and continue
+                                            current_page = next_page_num
+                                            
+                                        time.sleep(5)  # Additional wait for dynamic content to load
+                                        
+                                        # CRITICAL: Wait for Next.js data to refresh after pagination
+                                        logger.info(f"Waiting for Next.js data to refresh on page {next_page_num}...")
+                                        
+                                        # Wait for page content to fully refresh - this is crucial
+                                        try:
+                                            # Wait for the page content to change by checking URL parameters
+                                            page.wait_for_function(f"""
+                                                () => {{
+                                                    const urlParams = new URLSearchParams(window.location.search);
+                                                    const start = urlParams.get('start');
+                                                    return start === '{(next_page_num - 1) * 20}' || window.location.search.includes('start={(next_page_num - 1) * 20}');
+                                                }}
+                                            """, timeout=15000)
+                                            logger.info(f"URL parameters updated for page {next_page_num}")
+                                        except:
+                                            logger.warning("URL parameter check timeout, but continuing...")
+                                        
+                                        # Additional wait for Next.js data to refresh
+                                        time.sleep(3)
+                                        
+                                        # Now extract fresh Next.js data from the new page
+                                        current_page = next_page_num
+                                        continue  # Continue to next iteration to extract fresh data
+                                            
+                                    except Exception as e:
+                                        logger.warning(f"Page load timeout: {e}")
+                                        time.sleep(5)  # Fallback wait
+                                        current_page = next_page_num  # Assume success
+                                else:
+                                    logger.info(f"No pagination button found for page {next_page_num} - reached end of pages")
+                                    break
+                                    
+                            except Exception as e:
+                                logger.warning(f"Error navigating to next page: {e}")
+                                break
+                        else:
+                            logger.warning(f"No jobs found on page {current_page}, stopping pagination")
+                            break
+                    
+                    if all_jobs:
+                        # Limit to max_jobs if specified
+                        if self.max_jobs:
+                            all_jobs = all_jobs[:self.max_jobs]
+                        
+                        logger.info(f"SUCCESS! Extracted {len(all_jobs)} total jobs from {current_page} pages")
+                        self.process_nextjs_jobs(all_jobs, page)
+                        return  # Exit early with complete data
+                    else:
+                        logger.warning("Next.js extraction failed, continuing with analytics fallback")
+                    
+                    # Wait for analytics to load (shorter time)
+                    time.sleep(10)  # Reduced wait time to get analytics faster
+                    
+                except Exception as e:
+                    logger.warning(f"Page navigation issue, but continuing: {e}")
+                    # Continue anyway - we might still have captured analytics data
                 
-                # Wait for page to load and dynamic content to render
-                page.wait_for_selector('body', timeout=15000)
+                # Check if we got redirected or blocked
+                current_url = page.url
+                logger.info(f"Current URL after navigation: {current_url}")
                 
-                # Wait for job content to load (give more time for React/Next.js to render)
-                logger.info("Waiting for job content to load...")
-                time.sleep(8)  # Give more time for JavaScript to execute and render content
+                # Check page title to ensure we're on the right page
+                title = page.title()
+                logger.info(f"Page title: '{title}'")
+                
+                if not title or 'blocked' in title.lower() or 'captcha' in title.lower():
+                    logger.warning("Possible blocking or CAPTCHA detected")
+                    # Try to take a screenshot for debugging
+                    try:
+                        page.screenshot(path='prosple_page_screenshot.png')
+                        logger.info("Screenshot saved as prosple_page_screenshot.png")
+                    except Exception as e:
+                        logger.warning(f"Could not take screenshot: {e}")
+                
+                # Save page content for debugging with better error handling
+                try:
+                    content = page.content()
+                    logger.info(f"Page content length: {len(content)} characters")
+                    with open('prosple_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    logger.info("Saved page content to prosple_debug.html for analysis")
+                    
+                    # Log first 500 characters for immediate debugging
+                    if content:
+                        logger.info(f"Page content preview: {content[:500]}")
+                    else:
+                        logger.warning("Page content is empty!")
+                        
+                except Exception as e:
+                    logger.error(f"Error saving page content: {e}")
                 
                 # Try to trigger search/filtering to load job data
                 try:
@@ -961,13 +1721,46 @@ class ProspleAustraliaScraper:
                 except Exception as e:
                     logger.info(f"Could not interact with search elements: {e}")
                 
-                # Try to wait for common job-related elements
-                try:
-                    page.wait_for_selector('a[href*="/opportunities/"], .job, .card, [class*="job"]', timeout=15000)
-                    logger.info("Job content detected")
-                except Exception as e:
-                    logger.warning(f"No job elements loaded within timeout: {e}")
-                    logger.info("Proceeding with current page state")
+                # Extract job data from Next.js JSON immediately  
+                logger.info("Extracting job data from Next.js JSON...")
+                # Fallback to analytics if Next.js fails  
+                logger.warning("Next.js extraction failed, falling back to analytics...")
+                analytics_job_ids = self.extract_job_ids_from_analytics(api_requests)
+                if analytics_job_ids:
+                    logger.info(f"Successfully extracted {len(analytics_job_ids)} job IDs from analytics")
+                    jobs_to_process = analytics_job_ids[:self.max_jobs] if self.max_jobs else analytics_job_ids
+                    
+                    for i, job_id in enumerate(jobs_to_process, 1):
+                        try:
+                            logger.info(f"Processing job {i}/{len(jobs_to_process)}: ID {job_id}")
+                            job_url = f"https://au.prosple.com/graduate-opportunities/{job_id}"
+                            job_details = self.get_job_details_quick(job_url, job_id)
+                            
+                            if job_details:
+                                if 'processed' not in self.stats:
+                                    self.stats['processed'] = 0
+                                self.stats['processed'] += 1
+                                
+                                if self.save_job_from_data(job_details, None):
+                                    if 'saved' not in self.stats:
+                                        self.stats['saved'] = 0
+                                    self.stats['saved'] += 1
+                                else:
+                                    if 'duplicates' not in self.stats:
+                                        self.stats['duplicates'] = 0
+                                    self.stats['duplicates'] += 1
+                                    
+                            self.human_delay(1, 2)  # Short delay between jobs
+                        except Exception as e:
+                            logger.error(f"Error processing job ID {job_id}: {e}")
+                            if 'errors' not in self.stats:
+                                self.stats['errors'] = 0
+                            self.stats['errors'] += 1
+                    
+                    logger.info(f"Analytics extraction completed - processed {len(jobs_to_process)} jobs")
+                    return
+                
+                logger.info("Proceeding to traditional scraping as fallback...")
                 
                 # Log any API requests that were captured
                 if api_requests:
@@ -977,11 +1770,18 @@ class ProspleAustraliaScraper:
                 else:
                     logger.info("No job-related API requests detected")
                 
-                # Try alternative URL if needed
-                if "403" in page.content() or "forbidden" in page.content().lower():
-                    logger.info("Trying alternative URL with location filter...")
-                    page.goto(self.search_url_with_location)
-                    self.human_delay(3, 5)
+                # Log GraphQL requests separately
+                if graphql_requests:
+                    logger.info(f"Captured {len(graphql_requests)} GraphQL/API requests:")
+                    for req in graphql_requests:
+                        logger.info(f"  - {req['method']} {req['url']}")
+                        if req['post_data']:
+                            logger.info(f"    POST data: {req['post_data'][:200]}...")
+                else:
+                    logger.info("No GraphQL/API requests detected")
+                
+                # Don't wait for additional page loads - we already have the analytics data
+                logger.info("Skipping additional page loads - analytics data should be available")
                 
                 # Debug: Log page content to understand structure
                 logger.info(f"Page URL: {page.url}")
@@ -993,21 +1793,24 @@ class ProspleAustraliaScraper:
                 logger.info("Saved page content to prosple_debug.html for analysis")
                 
                 # Find job listings using generic selectors (no site-specific URLs)
+                # Updated selectors based on current website structure (December 2024)
                 job_selectors = [
-                    'li:has(section[role="button"])',         # Li with button section (stable structure)
-                    'li:has(a[href*="/job"])',                # Li containing any job-related links
-                    'li:has(a[href*="/career"])',             # Li containing career links
-                    'li:has(a[href*="/position"])',           # Li containing position links
-                    'li:has(h2)',                             # Li containing h2 titles
-                    'li:has(h3)',                             # Li containing h3 titles
-                    'section[role="button"]',                 # Direct section elements
-                    'article',                                # Article elements (common for job listings)
-                    '.job-listing',                           # Standard class selectors
+                    'article',                                # Primary: Article elements containing job cards
+                    'div[class*="card"]',                     # Card divs containing job info
+                    'a[href*="/graduate-opportunities/"]',   # Direct links to graduate opportunities
+                    'a[href*="/opportunities/"]',            # Direct links to job opportunities 
+                    'section[class*="job"]',                 # Section elements with job classes
+                    'div[class*="opportunity"]',             # Div elements with opportunity classes
+                    '[data-testid*="job"]',                  # Data attributes with job
+                    '[data-testid*="opportunity"]',          # Data attributes with opportunity
+                    'li:has(h2)',                            # Li containing h2 job titles
+                    'li:has(h3)',                            # Li containing h3 job titles
+                    '.job-listing',                          # Traditional job listing classes
                     '.job-card',
                     '.job-item',
-                    '.position',
-                    '.career-item',
-                    '[data-testid*="job"]'                    # Any data attribute with "job"
+                    '.opportunity-card',
+                    '[role="listitem"]',                     # List items that might contain jobs
+                    'div[class*="search-result"]'            # Search result containers
                 ]
                 
                 job_elements = []
@@ -1024,7 +1827,39 @@ class ProspleAustraliaScraper:
                         logger.debug(f"Error with selector {selector}: {e}")
                         continue
                 
-                # If still no elements, try to extract from Next.js JSON data
+                # Try analytics-based approach first - this is most reliable
+                logger.info("Trying analytics-based job extraction...")
+                job_ids = self.extract_job_ids_from_analytics(api_requests)
+                
+                if job_ids:
+                    logger.info(f"Found {len(job_ids)} job IDs from analytics, fetching job data...")
+                    analytics_jobs = self.fetch_job_data_from_api(job_ids, page)
+                    
+                    if analytics_jobs:
+                        logger.info(f"Successfully extracted {len(analytics_jobs)} jobs from analytics API")
+                        # Process jobs from analytics data
+                        jobs_to_process = analytics_jobs[:self.max_jobs] if self.max_jobs else analytics_jobs
+                        
+                        for i, job_data in enumerate(jobs_to_process, 1):
+                            try:
+                                logger.info(f"Processing job {i}/{len(jobs_to_process)}: {job_data['title']}")
+                                self.stats['total_processed'] += 1
+                                success = self.save_job_from_data(job_data, page)
+                                
+                                if success:
+                                    logger.info(f"Successfully saved: {job_data['title']}")
+                                
+                                # Add delay between jobs
+                                self.human_delay(1, 2)
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing job {i}: {e}")
+                                self.stats['errors'] += 1
+                                continue
+                        
+                        return  # Exit here since we processed jobs from analytics
+                
+                # Fallback 1: If no jobs found in analytics and no job elements, try Next.js JSON data
                 if not job_elements:
                     logger.warning("No job elements found with standard selectors, trying Next.js data extraction...")
                     nextjs_jobs = self.extract_jobs_from_nextjs_data(page)
