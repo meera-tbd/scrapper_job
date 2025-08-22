@@ -128,9 +128,24 @@ class JoobleAustraliaJobScraper:
             return None
     
     def human_delay(self, min_delay=2, max_delay=5):
-        """Add human-like delays to avoid detection."""
-        delay = random.uniform(min_delay, max_delay)
-        time.sleep(delay)
+        """Add human-like delays to avoid detection with variable patterns."""
+        import random
+        
+        # Add some randomness to make delays less predictable
+        if random.random() < 0.15:  # 15% chance of longer delay
+            delay = random.uniform(max_delay * 1.5, max_delay * 2.5)
+        else:
+            delay = random.uniform(min_delay, max_delay)
+        
+        # Add micro-pauses for more realistic behavior
+        if delay > 3:
+            # Split long delays into smaller chunks
+            chunks = random.randint(2, 4)
+            chunk_delay = delay / chunks
+            for _ in range(chunks):
+                time.sleep(chunk_delay + random.uniform(-0.2, 0.2))
+        else:
+            time.sleep(delay)
     
     def setup_browser(self):
         """Setup Playwright browser with stealth configuration."""
@@ -138,9 +153,9 @@ class JoobleAustraliaJobScraper:
         
         playwright = sync_playwright().start()
         
-        # Browser configuration for anti-detection
+        # Enhanced browser configuration for anti-detection
         self.browser = playwright.chromium.launch(
-            headless=False,  # Visible browser for better success rate
+            headless=False,  # Use visible browser for debugging
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -151,30 +166,73 @@ class JoobleAustraliaJobScraper:
                 '--disable-gpu',
                 '--disable-web-security',
                 '--disable-features=VizDisplayCompositor',
-                '--disable-blink-features=AutomationControlled'
+                '--disable-blink-features=AutomationControlled',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--window-size=1920,1080'
             ]
         )
         
-        # Create context with Australian settings
+        # Create context with enhanced Australian settings and realistic headers
+        import random
+        
+        # Rotate between realistic user agents
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15'
+        ]
+        
+        selected_ua = random.choice(user_agents)
+        
         self.context = self.browser.new_context(
-            viewport={'width': 1366, 'height': 768},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            viewport={'width': random.randint(1280, 1920), 'height': random.randint(720, 1080)},
+            user_agent=selected_ua,
             locale='en-AU',  # Australian locale
             timezone_id='Australia/Sydney',
             geolocation={'latitude': -33.8688, 'longitude': 151.2093},  # Sydney coordinates
-            permissions=['geolocation']
+            permissions=['geolocation'],
+            extra_http_headers={
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-AU,en;q=0.9,en-US;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0'
+            }
         )
         
-        # Add stealth scripts
+        # Add comprehensive stealth scripts
         self.context.add_init_script("""
             // Remove webdriver property
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined,
             });
             
-            // Mock plugins
+            // Mock plugins with realistic content
             Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
+                get: () => ({
+                    length: 3,
+                    0: { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
+                    1: { name: 'Chrome PDF Viewer', description: 'Portable Document Format', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                    2: { name: 'Native Client', description: 'Native Client Executable', filename: 'internal-nacl-plugin' }
+                }),
             });
             
             // Mock languages for Australia
@@ -184,8 +242,46 @@ class JoobleAustraliaJobScraper:
             
             // Mock chrome object
             window.chrome = {
-                runtime: {}
+                runtime: {},
+                loadTimes: function() { return {}; },
+                csi: function() { return {}; },
+                app: {}
             };
+            
+            // Mock permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+            
+            // Mock device memory
+            Object.defineProperty(navigator, 'deviceMemory', {
+                get: () => 8,
+            });
+            
+            // Mock hardware concurrency
+            Object.defineProperty(navigator, 'hardwareConcurrency', {
+                get: () => 4,
+            });
+            
+            // Mock battery
+            navigator.getBattery = () => Promise.resolve({
+                charging: true,
+                chargingTime: 0,
+                dischargingTime: Infinity,
+                level: 1
+            });
+            
+            // Mock connection
+            Object.defineProperty(navigator, 'connection', {
+                get: () => ({
+                    effectiveType: '4g',
+                    rtt: 50,
+                    downlink: 10
+                }),
+            });
         """)
         
         # Create page
@@ -201,6 +297,39 @@ class JoobleAustraliaJobScraper:
         })
         
         self.logger.info("Browser setup completed successfully")
+    
+    def handle_cloudflare_challenge(self, page):
+        """Handle Cloudflare challenge if detected."""
+        try:
+            # Check if we hit Cloudflare challenge
+            page_title = page.title()
+            page_content = page.content()
+            
+            if "Just a moment" in page_title or "cloudflare" in page_content.lower():
+                self.logger.warning("Cloudflare challenge detected. Waiting for resolution...")
+                
+                # Wait longer for Cloudflare to complete
+                self.human_delay(15, 25)
+                
+                # Check if challenge was resolved
+                try:
+                    page.wait_for_load_state('networkidle', timeout=30000)
+                    new_title = page.title()
+                    if "Just a moment" not in new_title:
+                        self.logger.info("Cloudflare challenge appears to be resolved")
+                        return True
+                    else:
+                        self.logger.warning("Cloudflare challenge still present after waiting")
+                        return False
+                except Exception as e:
+                    self.logger.warning(f"Timeout waiting for challenge resolution: {e}")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error handling Cloudflare challenge: {e}")
+            return False
     
     def close_browser(self):
         """Clean up browser resources."""
@@ -228,6 +357,12 @@ class JoobleAustraliaJobScraper:
             
             # Wait for page to load completely
             self.page.wait_for_selector('body', timeout=10000)
+            
+            # Handle Cloudflare challenge if present
+            if not self.handle_cloudflare_challenge(self.page):
+                self.logger.error("Failed to bypass Cloudflare challenge")
+                return False
+            
             self.human_delay(2, 4)
             
             # If we have search parameters, use the search form instead of URL params
@@ -424,14 +559,91 @@ class JoobleAustraliaJobScraper:
                 '.job-location'
             ])
             
-            # Extract salary using Jooble-specific selectors
+            # Extract salary using enhanced Jooble-specific selectors and patterns
             salary = self.extract_text_by_selectors(job_element, [
                 'p.b97WnG',                                 # Specific Jooble salary selector
                 '.QZH8mt p:first-child',                    # First paragraph in job details
                 '.salary',
                 'p:has-text("$")',                          # Any paragraph containing $
+                'p:has-text("AUD")',                        # Any paragraph containing AUD
                 '[class*="salary"]'
             ])
+            
+            # COMPREHENSIVE salary extraction for ALL jobs - try multiple sources
+            if not salary:
+                try:
+                    job_element_text = job_element.inner_text()
+                    self.logger.debug(f"Searching for salary in job element text ({len(job_element_text)} chars)")
+                    
+                    # UNIVERSAL salary patterns covering all possible formats
+                    salary_patterns = [
+                        # Range patterns with currency symbols
+                        r'\$\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*[-–—]\s*\$\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)?',
+                        r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*[-–—]\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:AUD|USD|AU\$|\$)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)?',
+                        
+                        # European decimal notation (35,00 format) - CRITICAL for your case
+                        r'(\d+,\d{2})\s*(?:AUD|USD|AU\$)\s*[/\\\s]*\s*(?:Hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)',
+                        r'(\d+,\d{2})\s*(?:AUD|USD|AU\$)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)',
+                        r'(\d+,\d{2})\s*(?:AUD|USD|AU\$)\s*/\s*(?:Hour|hr|hourly)',  # Specific format: 35,00 AUD / Hourly
+                        r'(\d+,\d{2})\s*(?:AUD|USD|AU\$)',  # Just amount with currency
+                        
+                        # Standard decimal patterns (35.00 format)
+                        r'(\d+\.\d{2})\s*(?:AUD|USD|AU\$)\s*[/\\\s]*\s*(?:Hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)',
+                        r'(\d+\.\d{2})\s*(?:AUD|USD|AU\$)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)',
+                        
+                        # Dollar sign patterns
+                        r'\$\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)',
+                        r'\$\s*(\d+(?:,\d+)*(?:\.\d{2})?)',  # Just dollar amount
+                        
+                        # Patterns without currency symbols
+                        r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)',
+                        
+                        # Salary with label patterns
+                        r'(?:Salary|Pay|Wage|Rate|Compensation):\s*\$?\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*[-–—]?\s*\$?\s*(\d+(?:,\d+)*(?:\.\d{2})?)?.*?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)?',
+                        r'(?:Salary|Pay|Wage|Rate|Compensation):\s*(\d+(?:,\d{2})?)\s*(?:AUD|USD|AU\$)',  # European with label
+                        
+                        # Flexible patterns for any number format
+                        r'(\d+(?:[,\.]\d+)*)\s*(?:AUD|USD|AU\$|dollars?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa|annually)?'
+                    ]
+                    
+                    for i, pattern in enumerate(salary_patterns):
+                        try:
+                            match = re.search(pattern, job_element_text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                            if match:
+                                potential_salary = match.group(0).strip()
+                                # Clean up extracted salary
+                                potential_salary = re.sub(r'\s+', ' ', potential_salary)  # Normalize whitespace
+                                potential_salary = potential_salary.replace('\n', ' ').replace('\r', ' ')
+                                
+                                # Filter out obvious non-salary patterns (like hours per week)
+                                if not (re.search(r'\d+\s*(?:hours?\s*)?(?:per\s*)?(?:week|weekly)', potential_salary, re.IGNORECASE) and 
+                                       not re.search(r'\$|AUD|USD', potential_salary, re.IGNORECASE)):
+                                    salary = potential_salary
+                                    self.logger.debug(f"Found salary with pattern {i+1}: '{salary}'")
+                                    break
+                                else:
+                                    self.logger.debug(f"Skipped non-salary pattern: '{potential_salary}'")
+                        except Exception as pattern_error:
+                            self.logger.debug(f"Pattern {i+1} failed: {pattern_error}")
+                            continue
+                            
+                    # If still no salary, try very broad search
+                    if not salary:
+                        broad_patterns = [
+                            r'[\$][\d,]+',  # Any dollar amount
+                            r'\d+[,\.]\d+\s*AUD',  # Any amount with AUD
+                            r'\d+\s*(?:per\s+)?(?:hour|hourly)',  # Any hourly rate
+                        ]
+                        
+                        for pattern in broad_patterns:
+                            match = re.search(pattern, job_element_text, re.IGNORECASE)
+                            if match:
+                                salary = match.group(0).strip()
+                                self.logger.debug(f"Found salary with broad pattern: '{salary}'")
+                                break
+                                
+                except Exception as e:
+                    self.logger.debug(f"Error in comprehensive salary extraction: {e}")
             
             # Extract job URL using Jooble-specific selectors
             url = ""
@@ -508,19 +720,30 @@ class JoobleAustraliaJobScraper:
             description = basic_description
             
             # Try to extract full description from detail pages only if basic description seems truncated
+            enhanced_salary = ""
+            enhanced_job_type = ""
+            
             if url and basic_description and (basic_description.endswith('...') or len(basic_description) < 200):
                 try:
                     self.logger.debug(f"Basic description seems truncated ({len(basic_description)} chars), attempting detail page extraction")
-                    full_description = self.extract_full_job_description(url)
+                    detail_data = self.extract_full_job_description(url)
                     
                     # Check if we got actual job content (not security challenge)
-                    if (full_description and 
-                        'verify you are human' not in full_description.lower() and
-                        'security' not in full_description.lower() and
-                        len(full_description) > len(basic_description)):
+                    if (detail_data and detail_data.get('description') and 
+                        'verify you are human' not in detail_data['description'].lower() and
+                        'security' not in detail_data['description'].lower() and
+                        len(detail_data['description']) > len(basic_description)):
                         
-                        description = full_description
-                        self.logger.info(f"✅ SUCCESS: Enhanced with FULL description ({len(full_description)} chars) vs basic ({len(basic_description)} chars)")
+                        description = detail_data['description']
+                        enhanced_salary = detail_data.get('salary', '')
+                        enhanced_job_type = detail_data.get('job_type', '')
+                        
+                        self.logger.info(f"✅ SUCCESS: Enhanced with FULL description ({len(description)} chars) vs basic ({len(basic_description)} chars)")
+                        
+                        if enhanced_salary:
+                            self.logger.info(f"✅ Found salary in full description: '{enhanced_salary}'")
+                        if enhanced_job_type:
+                            self.logger.info(f"✅ Found job type in full description: '{enhanced_job_type}'")
                     else:
                         self.logger.debug(f"⚠️ Detail page blocked by security - using basic description ({len(basic_description)} chars)")
                         
@@ -529,15 +752,92 @@ class JoobleAustraliaJobScraper:
             else:
                 self.logger.debug(f"Using basic description from job card ({len(basic_description)} chars)")
             
-            # Extract job type from tags
+            # Use enhanced salary if found and basic salary is empty
+            if enhanced_salary and not salary:
+                salary = enhanced_salary
+                self.logger.debug(f"Using enhanced salary from full description: '{salary}'")
+            
+            # COMPREHENSIVE job type extraction for ALL jobs
             job_type_text = self.extract_text_by_selectors(job_element, [
                 '[data-name="full_time"]',                  # Specific job type tag
                 '[data-name="part_time"]',
                 '[data-name="contract"]',
+                '[data-name="casual"]',
+                '[data-name="temporary"]',
+                '[data-name="permanent"]',
+                '[data-name="internship"]',
                 '.K8ZLnh.tag',                              # Job tags
                 '[data-test-name="_jobTag"]',               # Job tag test selector
                 '.job-type'
             ])
+            
+            # If no job type found in specific elements, extract from job element text
+            if not job_type_text:
+                try:
+                    job_element_text = job_element.inner_text()
+                    self.logger.debug(f"Searching for job type in job element text")
+                    
+                    # UNIVERSAL job type patterns covering all possibilities
+                    job_type_patterns = [
+                        # Explicit labels
+                        r'(?:Job\s+Type|Employment\s+Type|Contract\s+Type|Position\s+Type|Type):\s*(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship|Freelance)',
+                        
+                        # Context patterns
+                        r'(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship|Freelance)\s+(?:position|role|job|employment|opportunity)',
+                        r'(?:Seeking|Looking\s+for|We\s+need)\s+.*?(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship|Freelance)',
+                        
+                        # Schedule patterns
+                        r'(Full[- ]?time|Part[- ]?time)\s*[-:]',
+                        r'(?:^|\n|\s)(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship|Freelance)(?:\s|$|\n)',
+                        
+                        # Hours-based detection
+                        r'(\d+)\s*(?:hours?\s+)?(?:per\s+)?(?:week|weekly)',  # Extract hours to determine type
+                        r'(Full\s+time|Part\s+time)',  # Spaced versions
+                        
+                        # Tag-like patterns
+                        r'(?:^|\s|\|)(Full-time|Part-time|Contract|Casual|Temporary|Permanent|Internship|Freelance)(?:\s|\||$)',
+                        
+                        # Flexible patterns
+                        r'(Full.*time|Part.*time)',  # Catch variations
+                    ]
+                    
+                    for i, pattern in enumerate(job_type_patterns):
+                        try:
+                            match = re.search(pattern, job_element_text, re.IGNORECASE | re.MULTILINE)
+                            if match:
+                                if pattern.startswith(r'(\d+)'):  # Hours pattern
+                                    hours = int(match.group(1))
+                                    job_type_text = "Full-time" if hours >= 35 else "Part-time"
+                                    self.logger.debug(f"Detected job type from hours ({hours}): '{job_type_text}'")
+                                else:
+                                    job_type_text = match.group(1).strip()
+                                    self.logger.debug(f"Found job type with pattern {i+1}: '{job_type_text}'")
+                                break
+                        except Exception as pattern_error:
+                            self.logger.debug(f"Job type pattern {i+1} failed: {pattern_error}")
+                            continue
+                            
+                    # Advanced context analysis for job type
+                    if not job_type_text:
+                        text_lower = job_element_text.lower()
+                        
+                        # Analyze content for job type clues
+                        if any(word in text_lower for word in ['casual', 'flexible hours', 'as needed', 'on call']):
+                            job_type_text = "Casual"
+                        elif any(word in text_lower for word in ['intern', 'graduate program', 'trainee']):
+                            job_type_text = "Internship"
+                        elif any(word in text_lower for word in ['contract', 'fixed term', 'project based']):
+                            job_type_text = "Contract"
+                        elif any(word in text_lower for word in ['part time', 'part-time', '20 hours', '25 hours', '30 hours']):
+                            job_type_text = "Part-time"
+                        elif any(word in text_lower for word in ['full time', 'full-time', '38 hours', '40 hours', 'monday to friday']):
+                            job_type_text = "Full-time"
+                        
+                        if job_type_text:
+                            self.logger.debug(f"Detected job type from context analysis: '{job_type_text}'")
+                            
+                except Exception as e:
+                    self.logger.debug(f"Error in comprehensive job type extraction: {e}")
             
             # Extract posting date using Jooble-specific selectors
             date_text = self.extract_text_by_selectors(job_element, [
@@ -573,8 +873,12 @@ class JoobleAustraliaJobScraper:
             if not job_location:
                 job_location = "Australia"
             
-            # Detect job type from available information
-            detected_job_type = self.detect_job_type(job_element, title, description, job_type_text)
+            # Use enhanced job type if found, otherwise detect from available information
+            if enhanced_job_type:
+                detected_job_type = enhanced_job_type
+                self.logger.debug(f"Using enhanced job type from full description: '{detected_job_type}'")
+            else:
+                detected_job_type = self.detect_job_type(job_element, title, description, job_type_text)
             
             # Final debug logging
             self.logger.debug(f"Final extracted - Title: '{title}', Company: '{company}', Location: '{job_location}', Salary: '{salary}'")
@@ -612,9 +916,9 @@ class JoobleAustraliaJobScraper:
         return ""
     
     def extract_full_job_description(self, job_url):
-        """Extract full job description from individual job detail page."""
+        """Extract full job description, salary, and job type from individual job detail page."""
         if not job_url:
-            return ""
+            return {"description": "", "salary": "", "job_type": ""}
         
         try:
             self.logger.debug(f"Fetching full description from: {job_url[:80]}...")
@@ -622,9 +926,17 @@ class JoobleAustraliaJobScraper:
             # Create a new page context to avoid conflicts
             detail_page = self.context.new_page()
             
-            # Navigate to job detail page with more aggressive settings
-            detail_page.goto(job_url, wait_until='domcontentloaded', timeout=30000)
-            self.human_delay(3, 6)  # Give much more time for content to load
+            # Enhanced navigation with better anti-detection
+            detail_page.set_extra_http_headers({
+                'Referer': 'https://au.jooble.org/SearchResult',
+                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"'
+            })
+            
+            # Navigate with realistic behavior
+            detail_page.goto(job_url, wait_until='domcontentloaded', timeout=45000)
+            self.human_delay(4, 8)  # Longer delay to appear more human-like
             
             # Wait for content to fully load
             try:
@@ -789,6 +1101,123 @@ class JoobleAustraliaJobScraper:
                 except Exception as e:
                     self.logger.debug(f"Fallback extraction failed: {e}")
             
+            # Extract salary and job type from the full page content
+            page_salary = ""
+            page_job_type = ""
+            
+            try:
+                # Get all page text for salary and job type extraction
+                page_content = detail_page.content()
+                page_text = detail_page.locator('body').text_content()
+                
+                # Enhanced salary extraction from full page
+                salary_selectors = [
+                    # Specific salary display areas
+                    '.salary, .job-salary, [class*="salary"]',
+                    '.compensation, [class*="compensation"]',
+                    '.pay, [class*="pay"]',
+                    '.wage, [class*="wage"]',
+                    # Generic content areas that might contain salary
+                    '.job-details, [class*="details"]',
+                    '.job-info, [class*="info"]',
+                    '.job-summary, [class*="summary"]'
+                ]
+                
+                for selector in salary_selectors:
+                    try:
+                        elements = detail_page.query_selector_all(selector)
+                        for element in elements:
+                            element_text = element.inner_text().strip()
+                            # Look for salary patterns in element text
+                            salary_patterns = [
+                                r'\$[\d,]+(?:\.\d{2})?\s*-\s*\$[\d,]+(?:\.\d{2})?\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                                r'[\d,]+(?:\.\d{2})?\s*-\s*[\d,]+(?:\.\d{2})?\s+AUD\s*(?:/\s*)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                                r'[\d,]+(?:,\d{2})?\s+AUD\s*(?:/\s*)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',  # European decimal
+                                r'\$[\d,]+(?:\.\d{2})?\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                                r'[\d,]+(?:\.\d{2})?\s*(?:AUD|USD|AU\$|\$)\s*(?:/\s*)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?'
+                            ]
+                            
+                            for pattern in salary_patterns:
+                                match = re.search(pattern, element_text, re.IGNORECASE)
+                                if match:
+                                    page_salary = match.group(0).strip()
+                                    self.logger.debug(f"Found salary in element: '{page_salary}'")
+                                    break
+                            
+                            if page_salary:
+                                break
+                        if page_salary:
+                            break
+                    except:
+                        continue
+                
+                # If no salary found in specific elements, search full page text
+                if not page_salary and page_text:
+                    # Normalize whitespace for better pattern matching
+                    normalized_text = re.sub(r'\s+', ' ', page_text.replace('\n', ' ').replace('\r', ' '))
+                    
+                    # Enhanced salary patterns to handle European decimal notation and multi-line content
+                    salary_patterns = [
+                        # Salary with label - European decimal notation
+                        r'Salary:\s*(\d+,\d{2})\s+AUD\s*/?(?:\s*(?:Hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa))?',
+                        r'Salary:\s*(\d+,\d{2})\s*AUD\s*/?\s*(?:Hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                        
+                        # Standard patterns with label
+                        r'Salary:\s*\$?(\d+(?:,\d+)*(?:\.\d{2})?)\s*-?\s*\$?(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                        r'Salary:\s*\$?(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                        
+                        # Without label - European decimal notation (key pattern for your case)
+                        r'(\d+,\d{2})\s+AUD\s*/?(?:\s*(?:Hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa))',
+                        r'(\d+,\d{2})\s*AUD\s*/?\s*(?:Hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)',
+                        
+                        # Standard range patterns
+                        r'\$(\d+(?:,\d+)*(?:\.\d{2})?)\s*-\s*\$(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                        r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*-\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:AUD|USD|AU\$|\$)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)?',
+                        
+                        # Single value patterns
+                        r'\$(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)',
+                        r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:AUD|USD|AU\$|\$)\s*(?:per\s+)?(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa)'
+                    ]
+                    
+                    for pattern in salary_patterns:
+                        match = re.search(pattern, normalized_text, re.IGNORECASE)
+                        if match:
+                            # Extract the full match and clean it up
+                            page_salary = match.group(0).strip()
+                            if page_salary.lower().startswith('salary:'):
+                                page_salary = page_salary[7:].strip()
+                            
+                            # Normalize whitespace in extracted salary
+                            page_salary = re.sub(r'\s+', ' ', page_salary)
+                            
+                            self.logger.debug(f"Found salary in page text: '{page_salary}'")
+                            break
+                
+                # Enhanced job type extraction from full page
+                job_type_patterns = [
+                    r'Contract Type:\s*(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)',
+                    r'Employment Type:\s*(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)',
+                    r'Job Type:\s*(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)',
+                    r'Position Type:\s*(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)',
+                    r'Type:\s*(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)',
+                    r'(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)\s+position',
+                    r'(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)\s+role',
+                    r'(Full[- ]?time|Part[- ]?time|Contract|Casual|Temporary|Permanent|Internship)\s+employment'
+                ]
+                
+                for pattern in job_type_patterns:
+                    match = re.search(pattern, page_text, re.IGNORECASE)
+                    if match:
+                        if len(match.groups()) > 0:
+                            page_job_type = match.group(1).strip().lower().replace('-', '_').replace(' ', '_')
+                        else:
+                            page_job_type = match.group(0).strip().lower().replace('-', '_').replace(' ', '_')
+                        self.logger.debug(f"Found job type in page: '{page_job_type}'")
+                        break
+                
+            except Exception as e:
+                self.logger.debug(f"Error extracting salary/job type from page: {e}")
+            
             # Clean up the description
             if full_description:
                 full_description = self.clean_description_text(full_description)
@@ -796,7 +1225,11 @@ class JoobleAustraliaJobScraper:
             # Close the detail page
             detail_page.close()
             
-            return full_description
+            return {
+                "description": full_description,
+                "salary": page_salary,
+                "job_type": page_job_type
+            }
             
         except Exception as e:
             self.logger.error(f"Error extracting full description from {job_url}: {e}")
@@ -804,7 +1237,7 @@ class JoobleAustraliaJobScraper:
                 detail_page.close()
             except:
                 pass
-            return ""
+            return {"description": "", "salary": "", "job_type": ""}
     
     def clean_description_text(self, text):
         """Clean and format job description text while preserving ALL content."""
@@ -997,43 +1430,89 @@ class JoobleAustraliaJobScraper:
         return location_name, city, state, country
     
     def parse_salary(self, salary_text):
-        """Parse Australian salary information from text."""
+        """Parse Australian salary information from text with enhanced format support."""
         if not salary_text:
             return None, None, 'AUD', 'yearly'
         
-        # Australian salary patterns
+        # Clean salary text first
+        salary_text = salary_text.strip()
+        self.logger.debug(f"Parsing salary text: '{salary_text}'")
+        
+        # Enhanced Australian salary patterns with support for various formats
         patterns = [
-            r'\$\s*(\d+(?:,\d+)*)\s*-\s*\$\s*(\d+(?:,\d+)*)',  # $50,000 - $80,000
-            r'(\d+(?:,\d+)*)\s*-\s*(\d+(?:,\d+)*)',           # 50,000 - 80,000
+            # Range patterns with currency symbols and codes
+            r'\$\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*-\s*\$\s*(\d+(?:,\d+)*(?:\.\d{2})?)',  # $50,000.00 - $80,000.00
+            r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*-\s*(\d+(?:,\d+)*(?:\.\d{2})?)',           # 50,000.00 - 80,000.00
+            
+            # European decimal notation (comma as decimal separator)
+            r'\$?\s*(\d+,\d{2})\s*(?:AUD|USD|AU\$|\$)?\s*(?:/\s*(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa))?',  # 35,00 AUD / Hourly
+            r'(\d+,\d{2})\s*(?:AUD|USD|AU\$|\$)?\s*(?:/\s*(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa))?',        # 35,00 / Hourly
+            
+            # Standard patterns with currency codes
+            r'\$?\s*(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:AUD|USD|AU\$)?\s*(?:/\s*(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa))?',  # 50,000 AUD / Yearly
+            r'(\d+(?:,\d+)*(?:\.\d{2})?)\s*(?:AUD|USD|AU\$|\$)?\s*(?:/\s*(?:hour|hr|hourly|week|weekly|month|monthly|year|yearly|annum|pa))?',      # 50,000 / Yearly
+            
+            # Simple patterns (fallback)
             r'\$\s*(\d+(?:,\d+)*)',                            # $50,000
             r'(\d+(?:,\d+)*)'                                  # 50,000
         ]
         
         for pattern in patterns:
-            match = re.search(pattern, salary_text)
+            match = re.search(pattern, salary_text, re.IGNORECASE)
             if match:
                 try:
                     if len(match.groups()) == 2:
-                        min_sal = Decimal(match.group(1).replace(',', ''))
-                        max_sal = Decimal(match.group(2).replace(',', ''))
+                        # Range detected
+                        min_str = match.group(1)
+                        max_str = match.group(2)
+                        
+                        # Handle European decimal notation
+                        if ',' in min_str and '.' not in min_str and len(min_str.split(',')[-1]) == 2:
+                            min_sal = Decimal(min_str.replace(',', '.'))
+                        else:
+                            min_sal = Decimal(min_str.replace(',', ''))
+                        
+                        if ',' in max_str and '.' not in max_str and len(max_str.split(',')[-1]) == 2:
+                            max_sal = Decimal(max_str.replace(',', '.'))
+                        else:
+                            max_sal = Decimal(max_str.replace(',', ''))
                     else:
-                        min_sal = max_sal = Decimal(match.group(1).replace(',', ''))
+                        # Single value detected
+                        value_str = match.group(1)
+                        
+                        # Handle European decimal notation (e.g., 35,00)
+                        if ',' in value_str and '.' not in value_str and len(value_str.split(',')[-1]) == 2:
+                            # This is European decimal notation (35,00)
+                            min_sal = max_sal = Decimal(value_str.replace(',', '.'))
+                            self.logger.debug(f"Parsed European decimal: {value_str} -> {min_sal}")
+                        else:
+                            # Standard format with thousands separators (35,000)
+                            min_sal = max_sal = Decimal(value_str.replace(',', ''))
+                            self.logger.debug(f"Parsed standard format: {value_str} -> {min_sal}")
                     
-                    # Determine salary type
-                    salary_type = 'yearly'
-                    if any(word in salary_text.lower() for word in ['hour', 'hr', 'hourly']):
+                    # Enhanced salary type detection
+                    salary_type = 'yearly'  # Default
+                    salary_lower = salary_text.lower()
+                    
+                    if any(word in salary_lower for word in ['hour', 'hr', 'hourly', '/hour', '/ hour', 'per hour']):
                         salary_type = 'hourly'
-                    elif any(word in salary_text.lower() for word in ['month', 'monthly']):
+                    elif any(word in salary_lower for word in ['month', 'monthly', '/month', '/ month', 'per month']):
                         salary_type = 'monthly'
-                    elif any(word in salary_text.lower() for word in ['week', 'weekly']):
+                    elif any(word in salary_lower for word in ['week', 'weekly', '/week', '/ week', 'per week']):
                         salary_type = 'weekly'
-                    elif any(word in salary_text.lower() for word in ['day', 'daily']):
+                    elif any(word in salary_lower for word in ['day', 'daily', '/day', '/ day', 'per day']):
                         salary_type = 'daily'
+                    elif any(word in salary_lower for word in ['year', 'yearly', 'annum', 'pa', '/year', '/ year', 'per year', 'per annum']):
+                        salary_type = 'yearly'
                     
+                    self.logger.debug(f"Salary parsed successfully: min={min_sal}, max={max_sal}, type={salary_type}")
                     return min_sal, max_sal, 'AUD', salary_type
-                except:
+                    
+                except Exception as e:
+                    self.logger.debug(f"Pattern {pattern} failed: {e}")
                     continue
         
+        self.logger.debug(f"No salary pattern matched for: '{salary_text}'")
         return None, None, 'AUD', 'yearly'
     
     def get_or_create_company(self, company_name):
@@ -1210,6 +1689,17 @@ class JoobleAustraliaJobScraper:
             
             if not job_elements:
                 self.logger.warning("No job elements found on page")
+                
+                # Debug: Check what we actually got
+                page_title = self.page.title()
+                page_url = self.page.url
+                self.logger.debug(f"Current page title: {page_title}")
+                self.logger.debug(f"Current page URL: {page_url}")
+                
+                # Get page content to see if it's blocked
+                page_content = self.page.content()[:1000]  # First 1000 chars
+                self.logger.debug(f"Page content preview: {page_content}")
+                
                 return []
             
             self.logger.info(f"Found {len(job_elements)} job elements on page")
