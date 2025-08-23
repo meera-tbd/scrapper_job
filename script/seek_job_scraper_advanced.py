@@ -339,6 +339,49 @@ class ProfessionalSeekScraper:
             except:
                 job_data['keywords'] = []
             
+            # Attempt to fetch the FULL job description from the job detail page
+            # without navigating away or opening new tabs. We use a same-origin
+            # fetch from within the page context and parse the HTML with DOMParser.
+            try:
+                job_url_for_description = job_data.get('job_url', '')
+                if job_url_for_description:
+                    description_text = page.evaluate(
+                        """
+                        async (url) => {
+                            try {
+                                const response = await fetch(url, { credentials: 'include' });
+                                const html = await response.text();
+                                const parser = new DOMParser();
+                                const doc = parser.parseFromString(html, 'text/html');
+                                const selectors = [
+                                    '[data-automation="jobDescription"]',
+                                    '[data-automation="jobAdDetails"]',
+                                    '[data-automation="jobAd"]',
+                                    '[data-automation="searchDetailJob"]',
+                                    'div[data-automation="jobDetails"]',
+                                    'section[data-automation="job-detail"]'
+                                ];
+                                for (const sel of selectors) {
+                                    const el = doc.querySelector(sel);
+                                    if (el && el.innerText && el.innerText.trim().length > 0) {
+                                        return el.innerText.trim();
+                                    }
+                                }
+                                const main = doc.querySelector('main') || doc.body;
+                                return (main && main.innerText) ? main.innerText.trim() : '';
+                            } catch (_) {
+                                return '';
+                            }
+                        }
+                        """,
+                        job_url_for_description
+                    )
+                    if description_text and len(description_text) > len(job_data.get('summary', '') or ''):
+                        job_data['summary'] = description_text
+            except:
+                # If anything goes wrong, keep the short summary already captured
+                pass
+            
             logger.debug(f"Extracted job data: {job_data['job_title']} at {job_data['company_name']}")
             return job_data
             
@@ -744,7 +787,7 @@ def main():
     
     # Create scraper instance with professional settings
     scraper = ProfessionalSeekScraper(
-        headless=False, 
+        headless=True, 
         job_category="all", 
         job_limit=max_jobs
     )
