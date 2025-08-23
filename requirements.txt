@@ -2,6 +2,8 @@
 
 # Django framework
 Django>=4.2.0,<5.0.0
+djangorestframework>=3.14.0
+django-filter>=23.0
 
 # Database
 # For PostgreSQL:

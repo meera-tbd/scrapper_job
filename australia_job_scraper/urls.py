@@ -6,5 +6,6 @@ from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/', include('australia_job_scraper.api_urls')),
     path('', include('apps.jobs.urls')),
 ]
