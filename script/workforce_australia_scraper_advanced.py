@@ -1687,7 +1687,7 @@ class WorkforceAustraliaJobScraper:
         with sync_playwright() as p:
             # Launch browser with conservative settings for government site
             browser = p.chromium.launch(
-                headless=False,  # Visible browser for debugging and CAPTCHA handling
+                headless=True,  # Visible browser for debugging and CAPTCHA handling
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',
