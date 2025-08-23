@@ -1301,7 +1301,7 @@ class MissionAustraliaWorkdayJobScraper:
         with sync_playwright() as p:
             # Launch browser with Workday-compatible settings
             browser = p.chromium.launch(
-                headless=False,  # Visible browser for debugging
+                headless=True,  # Visible browser for debugging
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',
