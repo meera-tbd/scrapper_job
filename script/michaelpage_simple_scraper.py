@@ -152,6 +152,197 @@ class SimpleMichaelPageScraper:
         
         return None
     
+    def fetch_full_description(self, job_url):
+        """Fetch and return a clean, full job description from the job detail page.
+
+        This keeps the rest of the scraper intact and only enriches the
+        `summary` field with the full description content from the detail page.
+        """
+        try:
+            if not job_url:
+                return ""
+
+            response = self.session.get(job_url, timeout=30)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Prefer well-known Michael Page blocks if present
+            preferred_selectors = [
+                'div.job-description',
+                'div.job_advert__description',
+                'div.job-advert__description',
+                'div.job-advert',
+                'article.job',
+                'main',
+                'div[role="main"]'
+            ]
+
+            def collect_text(container):
+                if not container:
+                    return ""
+                parts = []
+                # Capture structured sections first (common MP headings)
+                headings = container.find_all(['h2', 'h3'])
+                if headings:
+                    # Allowed and ignored headings on Michael Page
+                    allowed_headings = [
+                        'about our client', 'job description', 'the successful applicant',
+                        "what's on offer", 'benefits', 'requirements', 'responsibilities',
+                        'key responsibilities', 'skills and experience', 'your profile', 'the role'
+                    ]
+                    ignored_headings = [
+                        'job summary', 'save job', 'apply', 'diversity & inclusion',
+                        'other users applied'
+                    ]
+                    # Normalizer used for deduplication
+                    def norm_text(t):
+                        t = re.sub(r'\s+', ' ', (t or '')).strip().lower()
+                        t = re.sub(r'[^a-z0-9\-&\s]', '', t)
+                        return t
+                    section_map = {}
+                    section_title_for_key = {}
+                    section_order = []
+                    global_seen = set()
+                    for heading in headings:
+                        heading_text = heading.get_text(strip=True)
+                        if not heading_text:
+                            continue
+                        heading_norm = heading_text.lower()
+                        if any(h in heading_norm for h in ignored_headings):
+                            continue
+                        if not any(h in heading_norm for h in allowed_headings):
+                            # Skip unknown/side headings to avoid noise blocks
+                            continue
+                        # Use the allowed heading as a stable key to merge duplicates
+                        key = None
+                        for ah in allowed_headings:
+                            if ah in heading_norm:
+                                key = ah
+                                break
+                        if key is None:
+                            key = heading_norm
+                        if key not in section_map:
+                            section_map[key] = []
+                            section_title_for_key[key] = heading_text
+                            section_order.append(key)
+                        section_lines = []
+                        for sib in heading.find_all_next():
+                            # Stop at the next heading at the same or higher level
+                            if sib.name in ['h2', 'h3']:
+                                break
+                            if sib.name in ['p', 'div']:
+                                text = sib.get_text(" ", strip=True)
+                                if text:
+                                    section_lines.append(text)
+                            elif sib.name in ['ul', 'ol']:
+                                for li in sib.find_all('li'):
+                                    li_text = li.get_text(" ", strip=True)
+                                    if li_text:
+                                        section_lines.append(f"- {li_text}")
+                        # Deduplicate within section and globally; drop contact details
+                        unique_lines = []
+                        seen_local = set()
+                        for ln in section_lines:
+                            n = norm_text(ln)
+                            if not n:
+                                continue
+                            if any(k in n for k in [
+                                'consultant name', 'consultant phone', 'job reference',
+                                'phone number', 'contact '
+                            ]):
+                                continue
+                            if n in seen_local or n in global_seen:
+                                continue
+                            seen_local.add(n)
+                            global_seen.add(n)
+                            unique_lines.append(ln)
+                        if unique_lines:
+                            section_map[key].extend(unique_lines)
+                    # If we built sections, format them once per heading in order
+                    if any(section_map.values()):
+                        for key in section_order:
+                            body = section_map.get(key) or []
+                            if not body:
+                                continue
+                            parts.append(section_title_for_key.get(key, key.title()))
+                            parts.append('\n'.join(body))
+                # Fallback: longest paragraph/list text from container
+                if not parts:
+                    texts = []
+                    for tag in container.find_all(['p', 'li']):
+                        t = tag.get_text(" ", strip=True)
+                        if t:
+                            texts.append(t)
+                    if texts:
+                        parts.append('\n'.join(texts))
+                text_joined = '\n\n'.join([p for p in parts if p])
+                # Global cleanups to remove unwanted boilerplate
+                remove_phrases = [
+                    'job summary', 'save job', 'apply',
+                    'diversity & inclusion at michael page',
+                    'other users applied', 'contact ', 'quote job ref', 'phone number'
+                ]
+                lines = []
+                for line in text_joined.splitlines():
+                    ln = line.strip()
+                    low = ln.lower()
+                    if not ln:
+                        continue
+                    if any(ph in low for ph in remove_phrases):
+                        continue
+                    # Skip consultant/contact metadata
+                    if any(k in low for k in [
+                        'consultant name', 'consultant phone', 'job reference',
+                        'function', 'specialisation', "what is your industry?", 'location', 'job type'
+                    ]):
+                        continue
+                    # Skip bare bullets that are just Save/Apply duplicates
+                    if ln in ['- Save Job', '- Apply']:
+                        continue
+                    lines.append(ln)
+                # Deduplicate globally while preserving order
+                cleaned = []
+                seen = set()
+                for ln in lines:
+                    n = re.sub(r'\s+', ' ', ln.strip().lower())
+                    if n in seen:
+                        continue
+                    seen.add(n)
+                    cleaned.append(ln)
+                return '\n'.join(cleaned)
+
+            # Try preferred selectors first
+            for sel in preferred_selectors:
+                container = soup.select_one(sel)
+                text = collect_text(container)
+                if text and len(text) > 200:  # ensure it's substantive
+                    return text
+
+            # Generic fallback: use the largest text block inside main/article
+            candidates = soup.select('main, article, div[role="main"], div.content, div.region-content')
+            best_text = ""
+            for c in candidates:
+                text = collect_text(c)
+                if len(text) > len(best_text):
+                    best_text = text
+            # Cut off at known tail boilerplates if still present
+            tail_cuts = [
+                'diversity & inclusion at michael page',
+                'other users applied'
+            ]
+            bt_low = best_text.lower()
+            cut_index = None
+            for cut in tail_cuts:
+                idx = bt_low.find(cut)
+                if idx != -1:
+                    cut_index = idx if cut_index is None else min(cut_index, idx)
+            if cut_index is not None:
+                best_text = best_text[:cut_index]
+            return best_text.strip()
+        except Exception as e:
+            logger.debug(f"Failed to fetch full description: {e}")
+            return ""
+
     def parse_location(self, location_string):
         """Parse location string into normalized location data."""
         if not location_string:
@@ -772,6 +963,14 @@ class SimpleMichaelPageScraper:
                         except Exception as e:
                             logger.debug(f"Quick duplicate check failed: {e}")
                             pass  # Continue with normal processing if quick check fails
+
+                    # Enrich summary with full description from the detail page
+                    try:
+                        full_desc = self.fetch_full_description(job_url)
+                        if full_desc:
+                            job_data['summary'] = full_desc
+                    except Exception as e:
+                        logger.debug(f"Could not enrich description: {e}")
                     
                     if self.save_job_to_database_sync(job_data):
                         jobs_saved_this_page += 1
