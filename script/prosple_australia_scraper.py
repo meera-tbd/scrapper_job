@@ -2022,7 +2022,7 @@ def main():
             sys.exit(1)
     
     # Create and run scraper (headless=False to see the browser)
-    scraper = ProspleAustraliaScraper(max_jobs=max_jobs, headless=False)
+    scraper = ProspleAustraliaScraper(max_jobs=max_jobs, headless=True)
     scraper.scrape_jobs()
 
 
