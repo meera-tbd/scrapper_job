@@ -137,7 +137,7 @@ class ArtsHubAustraliaJobScraper:
         
         # Browser configuration for anti-detection
         self.browser = playwright.chromium.launch(
-            headless=False,  # Visible browser for better success rate
+            headless=True,  # Visible browser for better success rate
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -958,26 +958,59 @@ class ArtsHubAustraliaJobScraper:
     def check_for_more_button(self):
         """Check if there's a 'More' button for pagination and get remaining posts count."""
         try:
-            # Look for the infinite scroll "More" button
-            more_button_selector = 'div[data-archive-infinite-scroll="load-more"] a.button--see-all-posts'
-            more_button = self.page.query_selector(more_button_selector)
+            # Ensure we're at the bottom where the More button appears
+            try:
+                self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                self.human_delay(0.8, 1.5)
+            except Exception:
+                pass
+
+            # Try multiple strategies to locate the "More" button
+            selectors = [
+                'div[data-archive-infinite-scroll="load-more"] a.button--see-all-posts',
+                'div[data-archive-infinite-scroll="load-more"] button.button--see-all-posts',
+                'a.button--see-all-posts',
+                'button.button--see-all-posts',
+                'a.button--more',
+                'button.button--more',
+                "a:has-text('More')",
+                "button:has-text('More')",
+                "a:has-text('MORE')",
+                "button:has-text('MORE')",
+            ]
+            more_button = None
+            for sel in selectors:
+                try:
+                    more_button = self.page.query_selector(sel)
+                    if more_button:
+                        self.logger.debug(f"Found More button using selector: {sel}")
+                        break
+                except Exception:
+                    continue
             
-            if more_button:
-                # Get remaining posts count
-                remaining_span = self.page.query_selector('span[data-archive-infinite-scroll="remaining-posts"]')
-                remaining_count = 0
-                if remaining_span:
-                    try:
-                        remaining_text = remaining_span.text_content().strip()
-                        remaining_count = int(remaining_text) if remaining_text.isdigit() else 0
-                    except:
-                        remaining_count = 0
-                
-                self.logger.info(f"📄 Found 'More' button with {remaining_count} remaining posts")
-                return more_button, remaining_count
-            else:
+            if not more_button:
                 self.logger.info("No 'More' button found - reached end of results")
                 return None, 0
+            
+            # Get remaining posts count either from dedicated span or button text like 'More (67)'
+            remaining_count = 0
+            try:
+                remaining_span = self.page.query_selector('span[data-archive-infinite-scroll="remaining-posts"]')
+                if remaining_span:
+                    remaining_text = (remaining_span.text_content() or '').strip()
+                    remaining_count = int(remaining_text) if remaining_text.isdigit() else 0
+                else:
+                    btn_text = (more_button.text_content() or '').strip()
+                    # Extract number inside parentheses e.g., More (67)
+                    import re as _re
+                    m = _re.search(r'\((\d+)\)', btn_text)
+                    if m:
+                        remaining_count = int(m.group(1))
+            except Exception:
+                remaining_count = 0
+            
+            self.logger.info(f"📄 Found 'More' button with {remaining_count} remaining posts")
+            return more_button, remaining_count
                 
         except Exception as e:
             self.logger.error(f"Error checking for More button: {e}")
@@ -988,12 +1021,54 @@ class ArtsHubAustraliaJobScraper:
         try:
             self.logger.info("🔄 Clicking 'More' button to load additional jobs...")
             
-            # Scroll the button into view first
-            more_button.scroll_into_view_if_needed()
-            self.human_delay(1, 2)
+            # Always scroll to bottom first
+            try:
+                self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            self.human_delay(0.8, 1.5)
+
+            # Count current jobs BEFORE clicking
+            initial_count = len(self.page.query_selector_all('a.card.card--big'))
+            self.logger.debug(f"Initial job count before clicking More: {initial_count}")
+
+            # Try multiple selectors and click forcefully
+            selectors = [
+                'div[data-archive-infinite-scroll="load-more"] a.button--see-all-posts',
+                'div[data-archive-infinite-scroll="load-more"] button.button--see-all-posts',
+                'a.button--see-all-posts',
+                'button.button--see-all-posts',
+                'a.button--more',
+                'button.button--more',
+                "a:has-text('More')",
+                "button:has-text('More')",
+                "a:has-text('MORE')",
+                "button:has-text('MORE')",
+            ]
+
+            clicked = False
+            for sel in selectors:
+                try:
+                    # Wait for selector to be attached/visible, then click
+                    self.page.wait_for_selector(sel, state='attached', timeout=3000)
+                    try:
+                        self.page.click(sel, force=True, timeout=5000)
+                    except Exception:
+                        # Fallback to JS click
+                        el = self.page.query_selector(sel)
+                        if el:
+                            self.page.evaluate("el => { el.scrollIntoView({block: 'center'}); el.click(); }", el)
+                        else:
+                            continue
+                    clicked = True
+                    self.logger.debug(f"Clicked More using selector: {sel}")
+                    break
+                except Exception:
+                    continue
             
-            # Click the More button
-            more_button.click()
+            if not clicked:
+                self.logger.warning("Could not click More button with any selector")
+                return False
             
             # Wait for new content to load
             self.logger.info("⏳ Waiting for new jobs to load...")
@@ -1001,10 +1076,6 @@ class ArtsHubAustraliaJobScraper:
             
             # Wait for new job elements to appear - check for increased count
             try:
-                # First get current job count
-                initial_count = len(self.page.query_selector_all('a.card.card--big'))
-                self.logger.debug(f"Initial job count before clicking More: {initial_count}")
-                
                 # Wait for job count to increase
                 self.page.wait_for_function(
                     f"""() => {{
@@ -1138,10 +1209,12 @@ class ArtsHubAustraliaJobScraper:
                 # Check for More button to continue pagination
                 more_button, remaining_count = self.check_for_more_button()
                 
-                if more_button and remaining_count > 0:
-                    self.logger.info(f"🔄 Found more jobs available: {remaining_count} remaining")
-                    
-                    # Click More button to load next batch
+                if more_button:
+                    if remaining_count > 0:
+                        self.logger.info(f"🔄 Found more jobs available: {remaining_count} remaining")
+                    else:
+                        self.logger.info("🔄 'More' button present but remaining count unknown/zero; clicking anyway")
+                    # Click More button to load next batch regardless of detected count
                     if self.click_more_button(more_button):
                         page_number += 1
                         self.human_delay(2, 4)  # Wait between page loads
