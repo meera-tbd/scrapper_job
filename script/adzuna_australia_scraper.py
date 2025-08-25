@@ -296,7 +296,7 @@ class AdzunaAustraliaJobScraper:
         
         # Browser configuration for anti-detection
         self.browser = playwright.chromium.launch(
-            headless=False,  # Visible browser for better success rate
+            headless=True,  # Visible browser for better success rate
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
