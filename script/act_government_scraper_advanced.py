@@ -1043,7 +1043,7 @@ class ACTGovernmentJobScraper:
         with sync_playwright() as p:
             # Launch browser
             self.browser = p.chromium.launch(
-                headless=False,  # Set to False for debugging
+                headless=True,  # Set to False for debugging
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',
