@@ -840,7 +840,7 @@ class PedestrianJobsScraper:
             with sync_playwright() as p:
                 # Launch browser
                 self.browser = p.chromium.launch(
-                    headless=False,
+                    headless=True,
                     args=[
                         '--no-sandbox',
                         '--disable-dev-shm-usage',

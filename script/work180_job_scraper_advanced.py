@@ -1304,7 +1304,7 @@ def main():
     
     # Create scraper instance with professional settings
     scraper = ProfessionalWork180Scraper(
-        headless=False, 
+        headless=True,
         job_category=job_category, 
         job_limit=max_jobs,
         location=location

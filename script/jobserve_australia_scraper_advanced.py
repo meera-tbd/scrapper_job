@@ -1450,7 +1450,7 @@ class JobServeAustraliaScraper:
         with sync_playwright() as p:
             # Launch browser with enhanced stealth settings
             browser = p.chromium.launch(
-                headless=False,  # Keep visible for debugging
+                headless=True,  # Keep visible for debugging
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',

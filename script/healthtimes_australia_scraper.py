@@ -162,7 +162,7 @@ class HealthTimesAustraliaJobScraper:
         """Create a browser context with Australian user agent."""
         if not self.browser:
             self.browser = sync_playwright().start().chromium.launch(
-                headless=False,
+                headless=True,
                 args=[
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
