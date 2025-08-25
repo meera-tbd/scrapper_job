@@ -155,7 +155,7 @@ class JoobleAustraliaJobScraper:
         
         # Enhanced browser configuration for anti-detection
         self.browser = playwright.chromium.launch(
-            headless=False,  # Use visible browser for debugging
+            headless=True,  # Use visible browser for debugging
             args=[
                 '--no-sandbox',
                 '--disable-setuid-sandbox',

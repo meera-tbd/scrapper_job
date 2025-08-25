@@ -173,7 +173,7 @@ class ScoutJobsAustraliaJobScraper:
         
         # Browser configuration for anti-detection
         self.browser = playwright.chromium.launch(
-            headless=False,  # Visible browser for better success rate
+            headless=True,  # Visible browser for better success rate
             slow_mo=1000,    # Add delay between actions
             args=[
                 '--no-sandbox',

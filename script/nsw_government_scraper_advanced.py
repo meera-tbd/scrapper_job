@@ -1417,7 +1417,7 @@ class NSWGovernmentJobScraper:
         with sync_playwright() as p:
             # Launch browser (visible for debugging)
             browser = p.chromium.launch(
-                headless=False,  # Changed to False so you can see the browser
+                headless=True,  # Changed to False so you can see the browser
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',
