@@ -1,0 +1,89 @@
+# Git and version control
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and databases
+*.log
+*.sqlite3
+logs/
+data/
+scraped_data/
+output/
+exports/
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Test files
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Environment variables
+.env*
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Playwright browsers (large files)
+.playwright/
+playwright/.browsers/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Process files
+*.pid
+
+# Project specific excludes
+setup_instructions.md
+CODE_REFERENCE.md
+API_DOCUMENTATION.md
