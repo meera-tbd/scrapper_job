@@ -1,0 +1,23 @@
+services:
+  # Django Web Application
+  web:
+    build: .
+    ports:
+      - "8001:8000"
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=1
+      - DB_NAME=australia_job_scraper
+      - DB_USER=postgres
+      - DB_PASSWORD=Evolgroup@123
+      - DB_HOST=host.docker.internal
+      - DB_PORT=5432
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+
+# Named volumes
+volumes:
+  postgres_data:

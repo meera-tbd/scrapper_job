@@ -65,7 +65,8 @@ TEMPLATES = [
 WSGI_APPLICATION = 'australia_job_scraper.wsgi.application'
 
 # Database
-# Using SQLite for demo purposes as requested
+# Note: Database configuration is handled in settings_dev.py
+# This is just a placeholder that gets overridden
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
