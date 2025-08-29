@@ -1,12 +1,12 @@
-# Django + Playwright Seek Scraper Requirements
+# Django + Playwright Job Scraper Requirements
 
 # Django framework
 Django>=4.2.0,<5.0.0
 djangorestframework>=3.14.0
 django-filter>=23.0
+django-cors-headers>=4.3.0
 
 # Database
-# For PostgreSQL:
 psycopg2-binary>=2.9.0
 
 # Web scraping
@@ -18,14 +18,7 @@ requests>=2.31.0
 python-dateutil>=2.8.0
 tzdata>=2024.1
 
-# Development and debugging (optional)
-ipython>=8.0.0
-django-extensions>=3.2.0
-
-# Logging and monitoring (optional)
-colorlog>=6.7.0
-
-# DRF schema (coreapi) to support DEFAULT_SCHEMA_CLASS in settings
+# DRF schema support (for API documentation)
 coreapi>=2.3.3
 coreschema>=0.0.4
 itypes>=1.2.0
