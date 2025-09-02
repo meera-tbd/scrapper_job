@@ -1561,5 +1561,37 @@ def main():
     scraper.run()
 
 
+def run(job_limit=300, category='all'):
+    """Automation entrypoint for NSW Government scraper.
+
+    Creates the scraper and runs it without CLI args. Returns a summary dict
+    for schedulers similar to Seek's run().
+    """
+    try:
+        scraper = NSWGovernmentJobScraper(job_category=category, job_limit=job_limit)
+        scraper.run()
+        return {
+            'success': True,
+            'pages_scraped': getattr(scraper, 'pages_scraped', None),
+            'jobs_scraped': getattr(scraper, 'jobs_scraped', None),
+            'duplicates_found': getattr(scraper, 'duplicate_count', None),
+            'errors_count': getattr(scraper, 'error_count', None),
+            'message': f"Completed NSW scraping with {getattr(scraper, 'jobs_scraped', 0)} jobs processed"
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 if __name__ == "__main__":
     main()

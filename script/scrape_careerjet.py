@@ -641,3 +641,25 @@ def main():
 if __name__ == '__main__':
     main()
 
+
+def run(max_jobs=None, headless=True):
+    """Automation entrypoint for Careerjet scraper."""
+    try:
+        scraper = CareerjetPlaywrightScraper(max_jobs=max_jobs, headless=headless)
+        saved = scraper.scrape()
+        return {
+            'success': True,
+            'jobs_saved': len(saved) if isinstance(saved, list) else None,
+            'message': 'Careerjet scraping completed'
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+

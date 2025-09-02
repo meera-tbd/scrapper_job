@@ -947,3 +947,30 @@ if __name__ == '__main__':
     main()
 
 
+def run(max_jobs=None):
+    """Automation entrypoint for Coles Careers scraper."""
+    try:
+        scraper = ColesScraper(max_jobs=max_jobs, headless=True)
+        count = scraper.scrape()
+        return {
+            'success': True,
+            'jobs_scraped': count,
+            'message': f'Coles scraping completed, saved {count} jobs'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+

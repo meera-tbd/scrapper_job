@@ -727,3 +727,26 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(max_jobs=None, headless=True):
+    """Automation entrypoint for The Creative Store scraper."""
+    try:
+        scraper = TheCreativeStoreScraper(max_jobs=max_jobs, headless=headless)
+        scraper.run_scraper()
+        return {
+            'success': True,
+            'jobs_scraped': scraper.scraped_count,
+            'skipped_count': scraper.skipped_count,
+            'error_count': scraper.error_count,
+            'message': 'The Creative Store scraping completed'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

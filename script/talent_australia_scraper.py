@@ -1463,3 +1463,25 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+def run(job_limit=None, max_pages=10):
+    """Automation entrypoint for Talent.com Australia scraper.
+
+    Runs the scraper without CLI args and returns a summary dictionary.
+    """
+    try:
+        scraper = TalentAustraliaJobScraper(job_limit=job_limit)
+        summary = scraper.run_scraping(max_searches=1, max_pages_per_search=max_pages)
+        summary = summary or {}
+        summary.update({'success': True})
+        return summary
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+

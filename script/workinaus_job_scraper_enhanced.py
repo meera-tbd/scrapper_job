@@ -824,3 +824,31 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(job_limit=50, job_category="all", location="all"):
+    """Automation entrypoint for WorkinAUS enhanced scraper."""
+    try:
+        scraper = WorkinAUSScraperEnhanced(
+            headless=True,
+            job_limit=job_limit,
+            job_category=job_category,
+            location=location
+        )
+        scraper.run()
+        return {
+            'success': True,
+            'jobs_scraped': getattr(scraper, 'scraped_count', None),
+            'duplicate_count': getattr(scraper, 'duplicate_count', None),
+            'error_count': getattr(scraper, 'error_count', None),
+            'message': 'WorkinAUS enhanced scraping completed'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

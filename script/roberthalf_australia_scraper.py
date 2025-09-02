@@ -76,7 +76,7 @@ class RobertHalfAustraliaScraper:
     Professional scraper for Robert Half Australia job listings
     """
     
-    def __init__(self, max_jobs=50, headless=True, max_pages=None):
+    def __init__(self, max_jobs=None, headless=True, max_pages=None):
         self.max_jobs = max_jobs
         self.max_pages = max_pages
         self.headless = headless
@@ -774,9 +774,12 @@ class RobertHalfAustraliaScraper:
                 if self.max_pages:
                     pages_to_scrape = list(range(1, min(self.max_pages + 1, total_pages + 1)))
                 else:
-                    # Calculate pages needed based on max_jobs
-                    pages_needed = (self.max_jobs + self.jobs_per_page - 1) // self.jobs_per_page
-                    pages_to_scrape = list(range(1, min(pages_needed + 1, total_pages + 1)))
+                    # Calculate pages to scrape; if unlimited, scrape all pages
+                    if self.max_jobs is None:
+                        pages_to_scrape = list(range(1, total_pages + 1))
+                    else:
+                        pages_needed = (self.max_jobs + self.jobs_per_page - 1) // self.jobs_per_page
+                        pages_to_scrape = list(range(1, min(pages_needed + 1, total_pages + 1)))
                 
                 logger.info(f"Will scrape {len(pages_to_scrape)} pages: {pages_to_scrape}")
                 
@@ -845,7 +848,7 @@ class RobertHalfAustraliaScraper:
                         self.stats['pages_scraped'] += 1
                         
                         # Check if we've reached the job limit
-                        if self.max_jobs and len(all_extracted_jobs) >= self.max_jobs:
+                        if self.max_jobs is not None and len(all_extracted_jobs) >= self.max_jobs:
                             logger.info(f"Reached job limit of {self.max_jobs}, stopping pagination")
                             all_extracted_jobs = all_extracted_jobs[:self.max_jobs]
                             break
@@ -910,7 +913,7 @@ class RobertHalfAustraliaScraper:
 
 def main():
     """Main function with pagination support"""
-    max_jobs = 50  # Default
+    max_jobs = None  # Default unlimited
     max_pages = None  # Default: auto-calculate based on max_jobs
     
     # Parse command line arguments
@@ -941,6 +944,30 @@ def main():
     scraper = RobertHalfAustraliaScraper(max_jobs=max_jobs, headless=True, max_pages=max_pages)
     scraper.scrape_jobs()
 
+
+def run(max_jobs=None, max_pages=None):
+    """Automation entrypoint for Robert Half Australia scraper."""
+    try:
+        scraper = RobertHalfAustraliaScraper(max_jobs=max_jobs, headless=True, max_pages=max_pages)
+        scraper.scrape_jobs()
+        return {
+            'success': True,
+            'message': 'Robert Half scraping completed'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 if __name__ == "__main__":
     main()

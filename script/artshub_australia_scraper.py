@@ -1328,5 +1328,30 @@ def main():
     scraper.run_scraping()
 
 
+def run(job_limit=200):
+    """Automation entrypoint for ArtsHub Australia scraper."""
+    try:
+        scraper = ArtsHubAustraliaJobScraper(job_limit=job_limit)
+        summary = scraper.run_scraping()
+        return {
+            'success': True,
+            'summary': summary,
+            'message': 'ArtsHub scraping completed'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 if __name__ == "__main__":
     main()

@@ -582,6 +582,29 @@ def main():
     scraper.scrape()
 
 
+def run(job_limit=300, headless=True):
+    """Automation entrypoint for JobsList scraper.
+
+    Mirrors the reference run() signature so schedulers can import and execute
+    without CLI args.
+    """
+    try:
+        scraper = JobsListScraper(job_limit=job_limit, headless=headless)
+        saved = scraper.scrape()
+        return {
+            'success': True,
+            'jobs_saved': saved,
+            'message': f'Saved {saved} JobsList jobs'
+        }
+    except Exception as e:
+        logger.error(f"Scraping failed in run(): {e}")
+        return {
+            'success': False,
+            'error': str(e),
+            'message': f'Scraping failed: {e}'
+        }
+
+
 if __name__ == '__main__':
     main()
 

@@ -16,8 +16,11 @@ DEBUG = os.getenv("DEBUG", "1") in ["1", "true", "True"]
 # Example env in docker-compose:
 #   ALLOWED_HOSTS=localhost,127.0.0.1,192.168.1.45
 #   CSRF_TRUSTED_ORIGINS=http://192.168.1.45:8001
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()]
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,192.168.0.15").split(",") if h.strip()]
+# In development, allow all hosts to avoid DisallowedHost when testing via LAN IPs
+if DEBUG and "*" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("*")
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("CSRF_TRUSTED_ORIGINS", "http://192.168.0.15:8001").split(",") if o.strip()]
 
 # Apps
 INSTALLED_APPS = [
@@ -28,8 +31,9 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
 
-    # Third party
-    "rest_framework",
+    'rest_framework',
+    'django_celery_beat',
+
     "corsheaders",  # enable CORS for cross-origin requests
 
     # Project apps
@@ -102,8 +106,10 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = os.getenv("TIME_ZONE", "Australia/Sydney")  # keep your chosen TZ; override via env if needed
+# Keep project local time for admin display
+TIME_ZONE = 'Asia/Kolkata'
 USE_I18N = True
+# Store datetimes in UTC in DB; Django converts to TIME_ZONE for display
 USE_TZ = True
 
 # Static files
@@ -134,3 +140,13 @@ if not CORS_ALLOW_ALL_ORIGINS:
     CORS_ALLOWED_ORIGINS = [
         o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
     ]
+
+
+# Celery configuration
+# Broker/result backend can be overridden via environment variables
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+CELERY_TIMEZONE = 'UTC'
+CELERY_ENABLE_UTC = True
+CELERY_TASK_ALWAYS_EAGER = False
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'

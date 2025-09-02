@@ -1051,3 +1051,22 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(job_limit=50):
+    """Automation entrypoint for Territory WorkerConnect scraper."""
+    try:
+        scrape_theterritory_jobs(job_limit)
+        return {
+            'success': True,
+            'message': f'Territory WorkerConnect scraping completed (limit {job_limit})'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

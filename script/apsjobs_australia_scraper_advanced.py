@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 class APSJobsAustraliaScraper:
     """Professional scraper for apsjobs.gov.au job listings."""
     
-    def __init__(self, max_jobs=30, headless=True):
+    def __init__(self, max_jobs=None, headless=True):
         """
         Initialize the scraper.
         
@@ -858,7 +858,7 @@ class APSJobsAustraliaScraper:
             logger.info(f"[COLLECT] Found {len(initial_jobs)} initial jobs")
         
         # Keep clicking "Load More" until no more jobs or limit reached
-        while load_attempts < max_load_attempts and len(all_jobs) < self.max_jobs:
+        while load_attempts < max_load_attempts and (self.max_jobs is None or len(all_jobs) < self.max_jobs):
             load_attempts += 1
             
             logger.info(f"[LOAD MORE] Attempt {load_attempts} - Current total: {len(all_jobs)} jobs")
@@ -891,7 +891,7 @@ class APSJobsAustraliaScraper:
         self.stats['pages_processed'] = load_attempts + 1  # Initial + load more attempts
         
         # Trim to requested limit if we exceeded it
-        if len(all_jobs) > self.max_jobs:
+        if self.max_jobs is not None and len(all_jobs) > self.max_jobs:
             logger.info(f"[LIMIT] Trimming {len(all_jobs)} jobs to requested {self.max_jobs}")
             final_jobs = all_jobs[:self.max_jobs]
         else:
@@ -908,7 +908,7 @@ class APSJobsAustraliaScraper:
         max_pages = 20  # Conservative limit for government sites
         pages_processed = 0
         
-        while pages_processed < max_pages and len(all_links) < self.max_jobs * 2:
+        while pages_processed < max_pages and (self.max_jobs is None or len(all_links) < self.max_jobs * 2):
             logger.info(f"[PAGE] Processing page {pages_processed + 1}")
             
             # Extract links from current page
@@ -938,7 +938,7 @@ class APSJobsAustraliaScraper:
         logger.info(f"[RESULT] Collected {len(unique_links)} unique job links across {pages_processed} pages")
         self.stats['total_found'] = len(unique_links)
         
-        return unique_links[:self.max_jobs * 2]  # Get extra links in case some fail
+        return unique_links if self.max_jobs is None else unique_links[:self.max_jobs * 2]  # Get extra links in case some fail
 
     def extract_job_data_from_detail_page(self, page, job_url):
         """Extract comprehensive job data from detail page."""
@@ -1581,7 +1581,7 @@ class APSJobsAustraliaScraper:
         
         logger.info("[START] Professional APS Jobs Australia Scraper")
         logger.info("=" * 60)
-        logger.info(f"Target: {self.max_jobs} jobs from apsjobs.gov.au")
+        logger.info(f"Target: {self.max_jobs or 'No limit'} jobs from apsjobs.gov.au")
         logger.info(f"Database: Professional structure with enhanced categorization")
         logger.info(f"Features: Government-focused, respectful crawling, APS classification")
         logger.info("=" * 60)
@@ -1724,6 +1724,34 @@ def main():
     scraper = APSJobsAustraliaScraper(max_jobs=args.max_jobs, headless=headless)
     scraper.run_scraper()
 
+
+def run(max_jobs=None, headless=True):
+    """Automation entrypoint for APS Jobs scraper.
+
+    Runs the scraper without CLI, returning the internal stats dict for schedulers.
+    """
+    try:
+        scraper = APSJobsAustraliaScraper(max_jobs=max_jobs, headless=headless)
+        scraper.run_scraper()
+        return {
+            'success': True,
+            'stats': getattr(scraper, 'stats', {}),
+            'message': 'APS Jobs scraping completed'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 if __name__ == "__main__":
     main()

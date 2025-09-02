@@ -2,32 +2,35 @@
 from .settings import *  # keep base defaults, then override below
 import os
 
-# -----------------------------------------------------------------------------
-# Debug / Hosts / CSRF / CORS
-# -----------------------------------------------------------------------------
-DEBUG = os.getenv("DEBUG", "1") in ["1", "true", "True"]
-
-# Example: ALLOWED_HOSTS=localhost,127.0.0.1,192.168.0.49
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
-
-# Example: CSRF_TRUSTED_ORIGINS=http://192.168.0.49:8001,http://localhost:8001
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()]
-
-# CORS configuration is inherited from base settings.py
-
-# -----------------------------------------------------------------------------
-# Database (shared PostgreSQL - Docker or local access)
-# -----------------------------------------------------------------------------
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("DB_NAME", "australia_job_scraper"),
-        "USER": os.getenv("DB_USER", "postgres"),
-        "PASSWORD": os.getenv("DB_PASSWORD", "Evolgroup@123"),
-        "HOST": os.getenv("DB_HOST", "localhost"),  # localhost for both Docker and local
-        "PORT": os.getenv("DB_PORT", "5433"),  # Use 5433 for local, 5432 inside Docker
+# Database configuration: Same PostgreSQL for both Docker and Local
+if os.getenv('DB_HOST'):
+    # Docker environment - connects to local PostgreSQL via host.docker.internal
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('DB_NAME', 'australia_job_scraper'),
+            'USER': os.getenv('DB_USER', 'postgres'),
+            'PASSWORD': os.getenv('DB_PASSWORD', 'Evolgroup@123'),
+            'HOST': os.getenv('DB_HOST', 'host.docker.internal'),
+            'PORT': os.getenv('DB_PORT', '5432'),
+        }
     }
-}
+else:
+    # Local environment - connects directly to local PostgreSQL
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql_psycopg2',
+            'NAME': 'australia_job_scraper',
+            'USER': 'postgres',
+            'PASSWORD': 'Evolgroup@123',
+            'HOST': 'localhost',
+            'PORT': '5432',
+        }
+    }
+
+DEBUG = True
+# Allow all hosts in development to avoid DisallowedHost when accessing via LAN IP
+ALLOWED_HOSTS = ['*']
 
 # -----------------------------------------------------------------------------
 # Dev security (relaxed)

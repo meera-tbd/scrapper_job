@@ -1715,5 +1715,35 @@ def main():
         sys.exit(1)
 
 
+def run(max_jobs=None):
+    """Automation entrypoint for Voyages scraper.
+
+    Creates the scraper and runs it without relying on CLI. Returns a summary dict
+    for schedulers (e.g., Celery) similar to the Seek scraper pattern.
+    """
+    try:
+        scraper = VoyagesScraper(max_jobs=max_jobs, headless=True)
+        jobs_scraped = scraper.scrape_jobs()
+        return {
+            'success': True,
+            'jobs_scraped': jobs_scraped,
+            'message': f'Successfully scraped {jobs_scraped} Voyages jobs'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e),
+            'message': f'Scraping failed: {str(e)}'
+        }
+
 if __name__ == "__main__":
     main()

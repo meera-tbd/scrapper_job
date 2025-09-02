@@ -503,7 +503,7 @@ class IAGScraper:
             # Collect across all pages
             jobs = self.collect_all_cards()
             logger.info(f"Found {len(jobs)} jobs across all pages")
-            if max_jobs:
+            if max_jobs is not None:
                 jobs = jobs[:max_jobs]
             logger.info(f"Processing {len(jobs)} jobs")
             for idx, job in enumerate(jobs, 1):
@@ -528,6 +528,31 @@ def main():
     scraper = IAGScraper(max_jobs=max_jobs, headless=True)
     scraper.run(max_jobs)
 
+
+def run(max_jobs=None):
+    """Automation entrypoint for IAG Australia scraper."""
+    try:
+        scraper = IAGScraper(max_jobs=max_jobs, headless=True)
+        saved = scraper.run(max_jobs)
+        return {
+            'success': True,
+            'saved_count': saved,
+            'message': f'IAG scraping completed, saved {saved} postings'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 if __name__ == '__main__':
     main()

@@ -564,3 +564,18 @@ if __name__ == "__main__":
     except Exception:
         pass
     scrape_teaching_jobs(max_jobs=mj, max_pages=mp)
+
+
+def run(max_jobs=None, max_pages=9999):
+    """Automation entrypoint for TeachingJobs scraper."""
+    try:
+        scrape_teaching_jobs(max_jobs=max_jobs, max_pages=max_pages)
+        return {
+            'success': True,
+            'message': f'TeachingJobs scraping completed (limit {max_jobs}, pages {max_pages})'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }

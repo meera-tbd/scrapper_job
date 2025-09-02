@@ -7,6 +7,8 @@ from django.contrib.auth import get_user_model
 from django.utils.text import slugify
 from apps.companies.models import Company
 from apps.core.models import Location
+from django_celery_beat.models import PeriodicTask, CrontabSchedule
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -109,6 +111,7 @@ class JobPosting(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     posted_ago = models.CharField(max_length=50, blank=True, help_text="Relative date like '2 days ago'")
     date_posted = models.DateTimeField(null=True, blank=True)
+    expired_at = models.DateTimeField(null=True, blank=True, help_text="When the job was marked expired")
     tags = models.TextField(blank=True, help_text="Comma-separated tags or skills")
     
     # Timestamps
@@ -160,3 +163,101 @@ class JobPosting(models.Model):
         elif self.salary_raw_text:
             return self.salary_raw_text
         return "Salary not specified"
+
+
+class JobScript(models.Model):
+    """Metadata for a scraping script that can be scheduled and executed."""
+    name = models.CharField(max_length=120, unique=True)
+    module_path = models.CharField(
+        max_length=255,
+        help_text="Python import path to callable, e.g. script.seek_job_scraper_advanced:run",
+        unique=True,
+    )
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class JobScheduler(models.Model):
+    """User-defined schedule that maps to a django-celery-beat PeriodicTask."""
+    FREQUENCY_CHOICES = [
+        ('minute', 'Every Minute'),
+        ('hourly', 'Hourly'),
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+        ('custom_days', 'Custom Days Of Month'),
+    ]
+
+    script = models.ForeignKey(JobScript, on_delete=models.CASCADE, related_name='schedules')
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily')
+    time_of_day = models.TimeField(help_text="Local time in TIME_ZONE to run")
+    # For weekly
+    day_of_week = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="0-6 (0=Sunday) or mon,tue,... (django-celery-beat format)"
+    )
+    # For monthly or custom days
+    days_of_month = models.CharField(
+        max_length=60,
+        blank=True,
+        help_text="Comma-separated day numbers like 1,8,15 or */2 for every 2 days"
+    )
+    enabled = models.BooleanField(default=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Link to Beat schedule entries
+    crontab = models.ForeignKey(CrontabSchedule, on_delete=models.SET_NULL, null=True, blank=True)
+    periodic_task = models.OneToOneField(PeriodicTask, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Job Scheduler'
+        verbose_name_plural = 'Job Schedulers'
+
+    def __str__(self):
+        return f"{self.script.name} @ {self.frequency} {self.time_of_day}"
+
+    def compute_cron_kwargs(self):
+        """Build CrontabSchedule kwargs from frequency and time_of_day."""
+        minute = f"{self.time_of_day.minute}"
+        hour = f"{self.time_of_day.hour}"
+        # Defaults
+        day_of_week = '*'
+        day_of_month = '*'
+        month_of_year = '*'
+
+        if self.frequency == 'minute':
+            # Run every minute (ignore time_of_day for this option)
+            minute = '*'
+            hour = '*'
+        elif self.frequency == 'hourly':
+            # Run every hour at the specified minute (ignore hour from time_of_day)
+            hour = '*'
+        elif self.frequency == 'daily':
+            pass
+        elif self.frequency == 'weekly':
+            day_of_week = self.day_of_week or 'mon'
+        elif self.frequency == 'monthly':
+            day_of_month = self.days_of_month or '1'
+        elif self.frequency == 'custom_days':
+            day_of_month = self.days_of_month or '1,8,15,22'
+
+        return {
+            'minute': minute,
+            'hour': hour,
+            'day_of_week': day_of_week,
+            'day_of_month': day_of_month,
+            'month_of_year': month_of_year,
+            'timezone': timezone.get_current_timezone_name(),
+        }

@@ -1432,5 +1432,30 @@ def main():
         sys.exit(1)
 
 
+def run(max_jobs: int = 300):
+    """Entry point used by the Celery scheduler.
+
+    Creates a `MiningCareersJobScraper`, runs it, and returns a small summary
+    dictionary that the task can record/log.
+    """
+    try:
+        scraper = MiningCareersJobScraper(max_jobs=max_jobs, headless=True)
+        scraped_jobs = scraper.scrape_jobs()
+        stats = scraper.get_stats()
+        return {
+            'success': True,
+            'scraped_count': len(scraped_jobs),
+            'db_total': stats.get('total_jobs_in_db'),
+            'recent_24h': stats.get('recent_jobs_24h'),
+            'message': f"Successfully scraped {len(scraped_jobs)} MiningCareers jobs"
+        }
+    except Exception as e:
+        logger.error(f"Scraping failed in run(): {e}")
+        return {
+            'success': False,
+            'error': str(e),
+        }
+
+
 if __name__ == "__main__":
     main()

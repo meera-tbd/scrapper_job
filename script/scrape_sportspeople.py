@@ -451,3 +451,19 @@ if __name__ == "__main__":
         except Exception:
             pass
     scrape_sportspeople(max_jobs=max_jobs)
+
+
+def run(max_jobs=None):
+    """Automation entrypoint for SportsPeople scraper."""
+    try:
+        scrape_sportspeople(max_jobs=max_jobs)
+        return {
+            'success': True,
+            'message': f'SportsPeople scraping completed (limit {max_jobs})'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
