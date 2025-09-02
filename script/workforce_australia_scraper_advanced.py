@@ -1832,5 +1832,28 @@ def main():
     scraper.run()
 
 
+def run():
+    """Standalone run function for Celery task execution."""
+    try:
+        scraper = WorkforceAustraliaJobScraper(job_limit=300)
+        scraper.run()
+        return {
+            'success': True,
+            'jobs_scraped': scraper.jobs_scraped,
+            'duplicate_count': scraper.duplicate_count,
+            'error_count': scraper.error_count,
+            'pages_scraped': scraper.pages_scraped,
+            'message': f'Successfully scraped {scraper.jobs_scraped} Workforce Australia jobs'
+        }
+    except Exception as e:
+        # Use logging consistent with this module
+        logging.getLogger(__name__).error(f"Scraping failed in run(): {str(e)}")
+        return {
+            'success': False,
+            'error': str(e),
+            'message': f'Scraping failed: {str(e)}'
+        }
+
+
 if __name__ == "__main__":
     main()

@@ -68,7 +68,7 @@ class SimpleMichaelPageScraper:
     Simple HTTP-based Michael Page Australia scraper.
     """
     
-    def __init__(self, job_limit=30):
+    def __init__(self, job_limit=None):
         """Initialize the simple scraper."""
         self.base_url = "https://www.michaelpage.com.au"
         self.job_limit = job_limit
@@ -491,7 +491,7 @@ class SimpleMichaelPageScraper:
                     unique_jobs.append(job)
             
             logger.info(f"Extracted {len(unique_jobs)} unique jobs from HTML")
-            return unique_jobs[:self.job_limit]  # Limit to requested number
+            return unique_jobs if self.job_limit is None else unique_jobs[:self.job_limit]
             
         except Exception as e:
             logger.error(f"Error extracting jobs from HTML: {str(e)}")
@@ -911,7 +911,7 @@ class SimpleMichaelPageScraper:
     def run(self):
         """Main method to run the scraping process with pagination support."""
         logger.info("Starting Simple Michael Page Australia job scraper...")
-        logger.info(f"Job limit: {self.job_limit}")
+        logger.info(f"Job limit: {self.job_limit or 'No limit'}")
         logger.info("Note: Now supports pagination with 'Show more Jobs' functionality")
         
         try:
@@ -919,7 +919,7 @@ class SimpleMichaelPageScraper:
             page_number = 0
             total_jobs_processed = 0
             
-            while current_url and self.scraped_count < self.job_limit:
+            while current_url and (self.job_limit is None or self.scraped_count < self.job_limit):
                 page_number += 1
                 logger.info(f"Fetching page {page_number}: {current_url}")
                 
@@ -945,7 +945,7 @@ class SimpleMichaelPageScraper:
                 # Process jobs from current page
                 jobs_saved_this_page = 0
                 for i, job_data in enumerate(jobs):
-                    if self.scraped_count >= self.job_limit:
+                    if self.job_limit is not None and self.scraped_count >= self.job_limit:
                         logger.info(f"Reached job limit of {self.job_limit}")
                         break
                     
@@ -981,7 +981,7 @@ class SimpleMichaelPageScraper:
                 logger.info(f"Page {page_number} completed: {jobs_saved_this_page} jobs saved")
                 
                 # Check if we've reached the limit
-                if self.scraped_count >= self.job_limit:
+                if self.job_limit is not None and self.scraped_count >= self.job_limit:
                     logger.info(f"Reached job limit of {self.job_limit}, stopping pagination")
                     break
                 
@@ -1029,12 +1029,12 @@ def main():
     print("="*50)
     
     # Parse command line arguments
-    max_jobs = 30  # Default
+    max_jobs = None  # Default (unlimited)
     if len(sys.argv) > 1:
         try:
             max_jobs = int(sys.argv[1])
         except ValueError:
-            print("Invalid number of jobs. Using default: 30")
+            print("Invalid number of jobs. Using unlimited.")
     
     print(f"Target: {max_jobs} jobs from Michael Page Australia")
     print("Method: Direct HTML parsing with 'Show more Jobs' pagination support")
@@ -1054,6 +1054,29 @@ def main():
         logger.error(f"Scraping failed: {str(e)}")
         raise
 
+
+def run(job_limit=None):
+    """Automation entrypoint for Michael Page simple scraper.
+
+    Creates the scraper and runs it without CLI args; returns a summary dict.
+    """
+    try:
+        scraper = SimpleMichaelPageScraper(job_limit=job_limit)
+        scraper.run()
+        return {
+            'success': True,
+            'jobs_scraped': scraper.scraped_count,
+            'duplicate_count': scraper.duplicate_count,
+            'error_count': scraper.error_count,
+            'message': f'Successfully scraped {scraper.scraped_count} Michael Page jobs'
+        }
+    except Exception as e:
+        logger.error(f"Scraping failed in run(): {e}")
+        return {
+            'success': False,
+            'error': str(e),
+            'message': f'Scraping failed: {e}'
+        }
 
 if __name__ == "__main__":
     main()

@@ -860,3 +860,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(max_jobs=None, max_pages=None):
+    """Automation entrypoint for Pro Bono Australia scraper."""
+    try:
+        scraper = ProBonoAustraliaScraper(max_jobs=max_jobs, headless=True, max_pages=max_pages)
+        scraper.scrape_jobs()
+        return {
+            'success': True,
+            'stats': getattr(scraper, 'stats', {}),
+            'message': 'Pro Bono Australia scraping completed'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

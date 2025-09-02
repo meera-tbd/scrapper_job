@@ -3,7 +3,14 @@ Serializers for the jobs app API.
 """
 
 from rest_framework import serializers
-from .models import JobPosting
+from .models import JobPosting, JobScript, JobScheduler
+from django_celery_beat.models import (
+    CrontabSchedule,
+    IntervalSchedule,
+    PeriodicTask,
+    SolarSchedule,
+    ClockedSchedule,
+)
 from apps.companies.models import Company
 from apps.core.models import Location
 
@@ -73,3 +80,74 @@ class JobPostingDetailSerializer(serializers.ModelSerializer):
             'id', 'slug', 'posted_by', 'salary_display', 'tags_list',
             'scraped_at', 'updated_at'
         ]
+
+
+class JobScriptListSerializer(serializers.ModelSerializer):
+    """Serializer for listing JobScript entries."""
+    
+    class Meta:
+        model = JobScript
+        fields = [
+            'id', 'name', 'module_path', 'description', 'is_active',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class JobSchedulerListSerializer(serializers.ModelSerializer):
+    """Serializer for listing JobScheduler entries."""
+    
+    script = JobScriptListSerializer(read_only=True)
+    
+    class Meta:
+        model = JobScheduler
+        fields = [
+            'id', 'script', 'frequency', 'time_of_day', 'day_of_week',
+            'days_of_month', 'enabled', 'last_run_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class CrontabScheduleSerializer(serializers.ModelSerializer):
+    """Serializer for django-celery-beat CrontabSchedule."""
+    
+    class Meta:
+        model = CrontabSchedule
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class IntervalScheduleSerializer(serializers.ModelSerializer):
+    """Serializer for django-celery-beat IntervalSchedule."""
+    
+    class Meta:
+        model = IntervalSchedule
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class SolarScheduleSerializer(serializers.ModelSerializer):
+    """Serializer for django-celery-beat SolarSchedule."""
+    
+    class Meta:
+        model = SolarSchedule
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class ClockedScheduleSerializer(serializers.ModelSerializer):
+    """Serializer for django-celery-beat ClockedSchedule."""
+    
+    class Meta:
+        model = ClockedSchedule
+        fields = '__all__'
+        read_only_fields = ['id']
+
+
+class PeriodicTaskSerializer(serializers.ModelSerializer):
+    """Serializer for django-celery-beat PeriodicTask."""
+    
+    class Meta:
+        model = PeriodicTask
+        fields = '__all__'
+        read_only_fields = ['id']

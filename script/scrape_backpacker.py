@@ -789,3 +789,23 @@ if __name__ == '__main__':
     run_backpacker_scraper(job_limit=None, headless=True)
 
 
+def run(job_limit=None, headless=True):
+    """Automation entrypoint for Backpacker Job Board scraper."""
+    try:
+        run_backpacker_scraper(job_limit=job_limit, headless=headless)
+        return {
+            'success': True,
+            'message': 'Backpacker scraping completed'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+

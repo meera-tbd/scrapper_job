@@ -659,15 +659,20 @@ class ProfessionalSeekScraper:
         logger.info(f"Job limit: {self.job_limit}")
         
         with sync_playwright() as p:
-            # Launch browser
+            # Launch browser with extended timeouts for Celery
             browser = p.chromium.launch(
                 headless=self.headless,
+                timeout=60000,  # 60 second timeout for browser launch
                 args=[
                     '--no-sandbox',
                     '--disable-blink-features=AutomationControlled',
                     '--disable-dev-shm-usage',
+                    '--disable-gpu',
                     '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor'
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding'
                 ]
             )
             
@@ -685,6 +690,10 @@ class ProfessionalSeekScraper:
                 }
             )
             page = context.new_page()
+            
+            # Set extended timeouts for Celery environment
+            page.set_default_timeout(90000)  # 90 seconds for all operations
+            page.set_default_navigation_timeout(120000)  # 2 minutes for navigation
             
             try:
                 # Navigate to starting URL with retry logic
@@ -801,6 +810,37 @@ def main():
     except Exception as e:
         logger.error(f"Scraping failed: {str(e)}")
         raise
+
+
+def run():
+    """Standalone run function for Celery task execution."""
+    try:
+        # Create scraper instance with professional settings
+        scraper = ProfessionalSeekScraper(
+            headless=True, 
+            job_category="all", 
+            job_limit=300  # Default for scheduled runs
+        )
+        
+        # Run the scraping process
+        scraper.run()
+        
+        # Return summary for Celery task
+        return {
+            'success': True,
+            'scraped_count': scraper.scraped_count,
+            'duplicate_count': scraper.duplicate_count,
+            'error_count': scraper.error_count,
+            'message': f'Successfully scraped {scraper.scraped_count} jobs'
+        }
+        
+    except Exception as e:
+        logger.error(f"Scraping failed in run(): {str(e)}")
+        return {
+            'success': False,
+            'error': str(e),
+            'message': f'Scraping failed: {str(e)}'
+        }
 
 
 if __name__ == "__main__":

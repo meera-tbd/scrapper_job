@@ -722,3 +722,24 @@ def parse_date(date_str: Optional[str]):
 if __name__ == '__main__':
     fetch_auspost_all_jobs()
 
+
+def run(job_limit=30, headless=True):
+    """Automation entrypoint for Australia Post scraper."""
+    try:
+        scraper = AusPostPlaywrightScraper(job_limit=job_limit, headless=headless)
+        scraper.run()
+        return {
+            'success': True,
+            'message': 'AusPost scraping completed'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+

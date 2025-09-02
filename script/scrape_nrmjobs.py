@@ -573,3 +573,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(max_jobs=None, headless=True):
+    """Automation entrypoint for NRMjobs scraper."""
+    try:
+        scraper = NRMJobsScraper(max_jobs=max_jobs, headless=headless)
+        count = scraper.scrape()
+        return {
+            'success': True,
+            'jobs_scraped': count,
+            'message': f'NRMjobs scraping completed, saved {count} jobs'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

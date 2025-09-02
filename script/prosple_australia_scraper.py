@@ -2026,5 +2026,33 @@ def main():
     scraper.scrape_jobs()
 
 
+def run(max_jobs=None, headless=True):
+    """Automation entrypoint for Prosple Australia scraper.
+
+    Runs the scraper without CLI and returns internal stats for schedulers.
+    """
+    try:
+        scraper = ProspleAustraliaScraper(max_jobs=max_jobs, headless=headless)
+        scraper.scrape_jobs()
+        return {
+            'success': True,
+            'stats': getattr(scraper, 'stats', {}),
+            'message': 'Prosple scraping completed'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 if __name__ == "__main__":
     main()

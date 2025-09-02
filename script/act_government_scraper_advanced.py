@@ -1204,5 +1204,10 @@ def main():
         raise
 
 
+def run():
+    """Entry point for scheduler system."""
+    return main()
+
+
 if __name__ == "__main__":
     main()

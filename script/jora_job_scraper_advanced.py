@@ -1454,5 +1454,34 @@ def main():
     scraper = JoraJobScraper(job_limit=job_limit)
     scraper.run()
 
+def run(job_limit=300):
+    """Standalone run function for Celery task execution.
+
+    Mirrors the Seek scraper's public `run()` so Celery can import and execute
+    this script on a schedule without CLI arguments.
+    """
+    try:
+        scraper = JoraJobScraper(job_limit=job_limit)
+        scraper.run()
+        return {
+            'success': True,
+            'scraped_count': scraper.jobs_scraped,
+            'duplicate_count': scraper.duplicate_count,
+            'error_count': scraper.error_count,
+            'pages_scraped': scraper.pages_scraped,
+            'message': f'Successfully scraped {scraper.jobs_scraped} Jora jobs'
+        }
+    except Exception as e:
+        # Use module logger without altering existing logging setup
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e),
+            'message': f'Scraping failed: {str(e)}'
+        }
+
 if __name__ == "__main__":
     main()

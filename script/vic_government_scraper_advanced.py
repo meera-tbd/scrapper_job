@@ -1231,5 +1231,42 @@ def main():
         raise
 
 
+def run(job_limit=300, max_pages=None, start_page=1):
+    """Automation entrypoint for Victorian Government scraper.
+
+    Instantiates the scraper and runs it without CLI args. Returns a summary
+    dict for schedulers, following the Seek run() style.
+    """
+    try:
+        scraper = VictorianGovernmentJobScraper(
+            job_limit=job_limit,
+            max_pages=max_pages,
+            start_page=start_page
+        )
+        scraper.run()
+        return {
+            'success': True,
+            'pages_scraped': getattr(scraper, 'pages_scraped', None),
+            'jobs_scraped': getattr(scraper, 'jobs_scraped', None),
+            'jobs_saved': getattr(scraper, 'jobs_saved', None),
+            'duplicates_found': getattr(scraper, 'duplicates_found', None),
+            'errors_count': getattr(scraper, 'errors_count', None),
+            'message': f"Completed VIC scraping with {getattr(scraper, 'jobs_saved', 0)} jobs saved"
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 if __name__ == "__main__":
     main()

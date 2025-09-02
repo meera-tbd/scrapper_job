@@ -43,7 +43,7 @@ from django.utils import timezone
 from django.db import transaction, connections
 from django.contrib.auth import get_user_model
 from django.utils.text import slugify
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError  # [cursor:reason] Catch navigation timeout
 
 # Import our professional models
 from apps.companies.models import Company
@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 class AdeccoAustraliaJobScraper:
     """Professional scraper for adecco.com/en-au/jobs job listings."""
     
-    def __init__(self, max_jobs=50, headless=True):
+    def __init__(self, max_jobs=None, headless=True):
         """
         Initialize the scraper.
         
@@ -103,7 +103,7 @@ class AdeccoAustraliaJobScraper:
         # Get or create the scraper user
         self.scraper_user = self._get_or_create_scraper_user()
         
-        logger.info(f"Adecco Australia scraper initialized. Max jobs: {max_jobs}")
+        logger.info(f"Adecco Australia scraper initialized. Max jobs: {max_jobs or 'No limit'}")
     
     def _get_or_create_scraper_user(self):
         """Get or create the system user for scraped jobs."""
@@ -547,7 +547,8 @@ class AdeccoAustraliaJobScraper:
             logger.info(f"Extracting full job details from individual page: {job_title}")
             
             # Navigate to individual job detail page
-            page.goto(job_url, wait_until='networkidle', timeout=30000)
+            # [cursor:reason] Use DOM load and higher timeout for detail pages to avoid timeouts
+            page.goto(job_url, wait_until='domcontentloaded', timeout=60000)
             self.processed_urls.add(job_url)
             
             # Wait for job detail content to fully load
@@ -1759,7 +1760,7 @@ class AdeccoAustraliaJobScraper:
             list: List of scraped job data
         """
         logger.info(f"Starting Adecco Australia scraping session...")
-        logger.info(f"Target: {self.max_jobs} jobs")
+        logger.info(f"Target: {self.max_jobs or 'No limit'} jobs")
         
         with sync_playwright() as p:
             # Launch browser
@@ -1775,11 +1776,21 @@ class AdeccoAustraliaJobScraper:
             )
             
             page = context.new_page()
+            # [cursor:reason] Be resilient to heavy third-party requests; avoid 'networkidle' stalls
+            page.set_default_navigation_timeout(60000)
             
             try:
-                # Go to jobs page
+                # Go to jobs page with minimal retry to handle intermittent network/CDN stalls
                 logger.info(f"Navigating to {self.jobs_url}")
-                page.goto(self.jobs_url, wait_until='networkidle', timeout=30000)
+                for attempt in range(1, 3):
+                    try:
+                        # [cursor:reason] Some sites never reach 'networkidle'; wait for DOM
+                        page.goto(self.jobs_url, wait_until='domcontentloaded', timeout=60000)
+                        break
+                    except PlaywrightTimeoutError:
+                        logger.warning(f"Initial navigation timeout (attempt {attempt}). Retrying once...")
+                        if attempt == 2:
+                            raise
                 
                 # Handle cookie consent if present
                 try:
@@ -1799,7 +1810,7 @@ class AdeccoAustraliaJobScraper:
                 jobs_scraped = 0
                 total_pages = None
                 
-                while jobs_scraped < self.max_jobs:
+                while (self.max_jobs is None) or (jobs_scraped < self.max_jobs):
                     logger.info(f"Scraping page {page_number}...")
                     
                     # Detect total pages on first page
@@ -1843,7 +1854,7 @@ class AdeccoAustraliaJobScraper:
                     # Extract data from each job element
                     job_data_list = []
                     for i, job_element in enumerate(job_elements):
-                        if jobs_scraped >= self.max_jobs:
+                        if self.max_jobs is not None and jobs_scraped >= self.max_jobs:
                             break
                         
                         logger.info(f"Extracting job {i+1}/{len(job_elements)}")
@@ -1876,7 +1887,7 @@ class AdeccoAustraliaJobScraper:
                     
                     # Now get full descriptions and save jobs to database
                     for job_data in job_data_list:
-                        if jobs_scraped >= self.max_jobs:
+                        if self.max_jobs is not None and jobs_scraped >= self.max_jobs:
                             break
                         
                         # Initialize details to avoid reference errors
@@ -1939,7 +1950,7 @@ class AdeccoAustraliaJobScraper:
                                 if self._save_job_to_database_sync(job_data):
                                     jobs_scraped += 1
                                     self.scraped_jobs.append(job_data)
-                                    logger.info(f"Saved job {jobs_scraped}/{self.max_jobs}: {job_data['title']}")
+                                    logger.info(f"Saved job {jobs_scraped}/{self.max_jobs or '∞'}: {job_data['title']}")
                             else:
                                 logger.info(f"Skipping job with invalid description: {job_data.get('title', '')}")
                         else:
@@ -1949,7 +1960,7 @@ class AdeccoAustraliaJobScraper:
                         time.sleep(random.uniform(1.0, 2.0))
                     
                     # Try to go to next page
-                    if jobs_scraped < self.max_jobs:
+                    if (self.max_jobs is None) or (jobs_scraped < self.max_jobs):
                         # Check if we've reached the detected total pages
                         if total_pages and page_number >= total_pages:
                             logger.info(f"Reached last page ({page_number} of {total_pages}). Stopping.")
@@ -1990,7 +2001,8 @@ class AdeccoAustraliaJobScraper:
                                 next_page_url = f"{self.jobs_url}?pg={page_number + 1}"
                                 logger.info(f"Navigating directly to page {page_number + 1}: {next_page_url}")
                                 
-                                page.goto(next_page_url, wait_until='networkidle', timeout=30000)
+                                # [cursor:reason] Avoid networkidle on sites with long-polling; extend timeout
+                                page.goto(next_page_url, wait_until='domcontentloaded', timeout=60000)
                                 time.sleep(3)  # Wait for content to fully load
                                 
                                 # Verify job cards loaded
@@ -2010,7 +2022,7 @@ class AdeccoAustraliaJobScraper:
                                 try:
                                     next_page_url = f"{self.jobs_url}?pg={page_number + 1}"
                                     logger.info(f"No next button found. Trying direct navigation to: {next_page_url}")
-                                    page.goto(next_page_url, wait_until='networkidle', timeout=30000)
+                                    page.goto(next_page_url, wait_until='domcontentloaded', timeout=60000)
                                     time.sleep(3)
                                     
                                     test_cards = page.query_selector_all('.card')
@@ -2065,7 +2077,7 @@ class AdeccoAustraliaJobScraper:
 def main():
     """Main function to run the scraper."""
     # Get max jobs from command line argument
-    max_jobs = 50
+    max_jobs = None
     headless = True
     if len(sys.argv) > 1:
         # Parse positional max_jobs and optional flags
@@ -2074,7 +2086,7 @@ def main():
                 try:
                     max_jobs = int(arg)
                 except ValueError:
-                    logger.error("Invalid max_jobs argument. Using default of 50.")
+                    logger.error("Invalid max_jobs argument. Using unlimited.")
             else:
                 if arg in ("--show", "--headed", "--headful"):
                     headless = False
@@ -2113,4 +2125,27 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(max_jobs=None, headless=True):
+    """Automation entrypoint for Adecco Australia scraper."""
+    try:
+        scraper = AdeccoAustraliaJobScraper(max_jobs=max_jobs, headless=headless)
+        scraped_jobs = scraper.scrape_jobs()
+        stats = scraper.get_stats()
+        return {
+            'success': True,
+            'jobs_scraped': len(scraped_jobs) if isinstance(scraped_jobs, list) else None,
+            'stats': stats,
+            'message': 'Adecco scraping completed'
+        }
+    except Exception as e:
+        try:
+            logger.error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
 

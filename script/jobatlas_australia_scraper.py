@@ -823,6 +823,30 @@ def main():
     scraper.run(max_pages=10)
 
 
+def run(job_limit=300, max_pages=10):
+    """Automation entrypoint for JobAtlas Australia scraper."""
+    try:
+        scraper = JobAtlasAustraliaScraper(job_limit=job_limit, headless=True)
+        scraper.run(max_pages=max_pages)
+        return {
+            'success': True,
+            'message': 'JobAtlas scraping completed'
+        }
+    except SystemExit as e:
+        return {
+            'success': int(getattr(e, 'code', 1)) == 0,
+            'exit_code': getattr(e, 'code', 1)
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 if __name__ == '__main__':
     main()
 

@@ -536,3 +536,19 @@ if __name__ == "__main__":
     fetch_staff_australia_jobs(max_jobs=max_jobs)
 
 
+def run(max_jobs=None):
+    """Automation entrypoint for Staff Australia scraper."""
+    try:
+        fetch_staff_australia_jobs(max_jobs=max_jobs)
+        return {
+            'success': True,
+            'message': f'Staff Australia scraping completed (limit {max_jobs})'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+

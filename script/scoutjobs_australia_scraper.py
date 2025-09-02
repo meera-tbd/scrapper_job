@@ -1408,3 +1408,26 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(job_limit=None):
+    """Automation entrypoint for Scout Jobs Australia scraper.
+
+    Creates the scraper and runs it without CLI args; returns a summary dict.
+    """
+    try:
+        scraper = ScoutJobsAustraliaJobScraper(job_limit=job_limit)
+        summary = scraper.run_scraping()
+        # run_scraping already returns a summary dict; include success flag
+        summary = summary or {}
+        summary.update({'success': True})
+        return summary
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

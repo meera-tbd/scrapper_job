@@ -1456,3 +1456,31 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run(job_limit=300):
+    """Automation entrypoint for Mission Australia (Workday) scraper.
+
+    Instantiates the scraper and runs it without CLI args. Returns a summary
+    similar to the Seek reference run().
+    """
+    try:
+        scraper = MissionAustraliaWorkdayJobScraper(job_limit=job_limit)
+        scraper.run()
+        return {
+            'success': True,
+            'jobs_scraped': getattr(scraper, 'jobs_scraped', None),
+            'duplicate_count': getattr(scraper, 'duplicate_count', None),
+            'error_count': getattr(scraper, 'error_count', None),
+            'pages_scraped': getattr(scraper, 'pages_scraped', None),
+            'message': 'Mission Australia Workday scraping completed'
+        }
+    except Exception as e:
+        try:
+            logging.getLogger(__name__).error(f"Scraping failed in run(): {e}")
+        except Exception:
+            pass
+        return {
+            'success': False,
+            'error': str(e)
+        }

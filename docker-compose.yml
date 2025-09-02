@@ -1,23 +1,118 @@
 services:
-  # Django Web Application
+  db:
+    image: postgres:15
+    container_name: project1_db
+    environment:
+      POSTGRES_DB: australia_job_scraper
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Evolgroup@123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Expose DB port for local development access
+    ports:
+      - "127.0.0.1:5433:5432"  # Use port 5433 to avoid conflicts
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: project1_redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+
   web:
     build: .
+    container_name: project1_web
     ports:
-      - "8001:8000"
+      - "8001:8000"    # access via http://<PC-A-LAN-IP>:8001
     volumes:
       - .:/app
     environment:
       - DEBUG=1
+      - TZ=Asia/Kolkata  # [cursor:reason] Align container/system timezone to IST
       - DB_NAME=australia_job_scraper
       - DB_USER=postgres
       - DB_PASSWORD=Evolgroup@123
-      - DB_HOST=host.docker.internal
-      - DB_PORT=5432
+      - DB_HOST=host.docker.internal  # [cursor:reason] Use host Postgres for single source of truth
+      - DB_PORT=5432  # [cursor:reason] Host Postgres port
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CELERY_TIMEZONE=Asia/Kolkata  # [cursor:reason] Ensure Celery inherits IST when used in this container
+      # Network access configuration
+      - ALLOWED_HOSTS=localhost,127.0.0.1,192.168.0.23,192.168.0.15
+      - CSRF_TRUSTED_ORIGINS=http://localhost:8001,http://127.0.0.1:8001,http://192.168.0.15:8001
+      - CORS_ALLOW_ALL_ORIGINS=1
+      # Django Admin network access settings
+      - SESSION_COOKIE_SECURE=False
+      - CSRF_COOKIE_SECURE=False
+    depends_on:
+      - db
+      - redis  # [cursor:reason] No longer depend on internal db service
     restart: unless-stopped
     command: >
       sh -c "python manage.py migrate &&
              python manage.py runserver 0.0.0.0:8000"
+    healthcheck:  # [cursor:reason] Basic healthcheck using wget (available in image)
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-# Named volumes
+  celery_worker:
+    build: .
+    container_name: project1_celery_worker
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=1
+      - TZ=Asia/Kolkata  # [cursor:reason] Align worker container timezone to IST
+      - DB_NAME=australia_job_scraper
+      - DB_USER=postgres
+      - DB_PASSWORD=Evolgroup@123
+      - DB_HOST=host.docker.internal  # [cursor:reason] Use host Postgres
+      - DB_PORT=5432  # [cursor:reason] Host Postgres port
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CELERY_TIMEZONE=Asia/Kolkata  # [cursor:reason] Run Celery worker in IST
+    depends_on:
+      - redis  # [cursor:reason] No longer depend on internal db service
+    restart: unless-stopped
+    command: >
+      sh -c "celery -A australia_job_scraper worker -l info"
+    healthcheck:  # [cursor:reason] Ensure worker can connect to broker and respond to inspect
+      test: ["CMD-SHELL", "celery -A australia_job_scraper inspect registered >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  celery_beat:
+    build: .
+    container_name: project1_celery_beat
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=1
+      - TZ=Asia/Kolkata  # [cursor:reason] Align beat container timezone to IST
+      - DB_NAME=australia_job_scraper
+      - DB_USER=postgres
+      - DB_PASSWORD=Evolgroup@123
+      - DB_HOST=host.docker.internal  # [cursor:reason] Use host Postgres
+      - DB_PORT=5432  # [cursor:reason] Host Postgres port
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CELERY_TIMEZONE=Asia/Kolkata  # [cursor:reason] Run Celery beat in IST
+    depends_on:
+      - redis  # [cursor:reason] No longer depend on internal db service
+    restart: unless-stopped
+    command: >
+      sh -c "celery -A australia_job_scraper beat -l info"
+    healthcheck:  # [cursor:reason] Verify beat creates its schedule file or has started
+      test: ["CMD-SHELL", "test -f /app/celerybeat-schedule || test -f /tmp/celerybeat-schedule || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # [cursor:reason] Flower removed per request; monitoring UI not needed
+
 volumes:
   postgres_data:
