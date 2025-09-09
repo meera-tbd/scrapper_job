@@ -4,6 +4,10 @@ services:
     container_name: project1_db
     env_file:
       - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     # Expose DB port for local development access
@@ -22,20 +26,25 @@ services:
     build: .
     container_name: project1_web
     ports:
-      - "8001:8000"    # access via http://<PC-A-LAN-IP>:8001
+      - "8003:8003"    # access via http://<PC-A-LAN-IP>:8003 or http://localhost:8003
     volumes:
       - .:/app
     env_file:
       - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       - db
       - redis  # [cursor:reason] No longer depend on internal db service
     restart: unless-stopped
     command: >
       sh -c "python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8000"
+             python manage.py runserver 0.0.0.0:8003"
     healthcheck:  # [cursor:reason] Basic healthcheck using wget (available in image)
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8003/"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -47,7 +56,13 @@ services:
       - .:/app
     env_file:
       - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
+      - db
       - redis  # [cursor:reason] No longer depend on internal db service
     restart: unless-stopped
     command: >
@@ -65,7 +80,13 @@ services:
       - .:/app
     env_file:
       - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
+      - db
       - redis  # [cursor:reason] No longer depend on internal db service
     restart: unless-stopped
     command: >

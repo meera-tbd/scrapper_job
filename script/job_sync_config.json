@@ -20,8 +20,8 @@
     "local_ip": {
       "type": "local",
       "enabled": true,
-      "base_url": "http://192.168.0.124:8001/api/v1",
-      "endpoint_path": "/Jobs",
+      "base_url": "http://192.168.0.124:8003/api",
+      "endpoint_path": "/jobs/",
       "api_key": "",
       "auth_token": "",
       "rate_limit": 100,
