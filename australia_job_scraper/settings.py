@@ -36,11 +36,11 @@ DEBUG = os.getenv("DEBUG", "1") in ["1", "true", "True"]
 # Example env in docker-compose:
 #   ALLOWED_HOSTS=localhost,127.0.0.1,192.168.1.45
 #   CSRF_TRUSTED_ORIGINS=http://192.168.1.45:8001
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,192.168.0.29").split(",") if h.strip()]
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
 # In development, allow all hosts to avoid DisallowedHost when testing via LAN IPs
 if DEBUG and "*" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append("*")
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("CSRF_TRUSTED_ORIGINS", "http://192.168.0.15:8001").split(",") if o.strip()]
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()]
 
 # Apps
 INSTALLED_APPS = [
@@ -193,3 +193,11 @@ CELERY_TIMEZONE = 'UTC'
 CELERY_ENABLE_UTC = True
 CELERY_TASK_ALWAYS_EAGER = False
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+"""
+Celery connection resilience
+- Celery 6.0+ changes the startup retry behavior. To retain the existing
+  behavior (retry connecting to the broker during startup), enable the
+  following setting. Max retries -1 means retry forever.
+"""
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_CONNECTION_MAX_RETRIES = -1
