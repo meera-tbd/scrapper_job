@@ -111,6 +111,15 @@ class JobSchedulerListSerializer(serializers.ModelSerializer):
 class CrontabScheduleSerializer(serializers.ModelSerializer):
     """Serializer for django-celery-beat CrontabSchedule."""
     
+    # Ensure timezone is JSON serializable (ZoneInfo/pytz -> string)
+    timezone = serializers.SerializerMethodField()
+
+    def get_timezone(self, obj):
+        tz = getattr(obj, 'timezone', None)
+        if tz is None:
+            return None
+        return getattr(tz, 'key', getattr(tz, 'zone', str(tz)))
+
     class Meta:
         model = CrontabSchedule
         fields = '__all__'
