@@ -14,12 +14,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# System libraries required by Playwright Chromium
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgobject-2.0-0 \
+    libnss3 \
+    libnspr4 \
+    libdbus-1-3 \
+    libexpat1 \
+    libx11-6 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libxshmfence1 \
+    libxcb1 \
+    libxkbcommon0 \
+    libdrm2 \
+    libgbm1 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libatspi2.0-0 \
+    libcairo2 \
+    libgio-2.0-0 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcups2 \
+    libxext6 \
+    libxtst6 \
+    libgtk-3-0 \
+    libasound2 \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browser with system dependencies
-RUN playwright install --with-deps chromium || (apt-get update && playwright install --with-deps chromium)
+# Install Playwright browser (skip OS deps to avoid build failure on Debian variants)
+RUN python -m playwright install chromium || true
 
 # Copy project files
 COPY . .

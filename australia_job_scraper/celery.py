@@ -30,16 +30,8 @@ if platform.system() == 'Windows':
     app.conf.worker_pool = 'solo'
     app.conf.worker_concurrency = 1
 
-# Alternative: force load tasks after Django is ready
-@app.on_after_configure.connect
-def setup_periodic_tasks(sender, **kwargs):
-    """Ensure tasks are loaded after configuration."""
-    try:
-        import django
-        django.setup()
-        from apps.jobs import tasks  # Force task registration
-    except Exception:
-        pass
+# Alternative: let Celery autodiscovery load tasks; avoid calling django.setup() here
+# Re-entrant calls to django.setup() can cause RuntimeError during worker init
 
 
 @app.task(bind=True)

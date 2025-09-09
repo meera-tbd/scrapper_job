@@ -1,0 +1,36 @@
+{
+  "database": {
+    "type": "django",
+    "database": "australia_job_scraper",
+    "host": "localhost",
+    "user": "postgres",
+    "password": "Evolgroup@123",
+    "port": 5432
+  },
+  "portals": {
+    "local": {
+      "enabled": true,
+      "base_url": "https://68badccd84055bce63f06583.mockapi.io/api/v1",
+      "endpoint_path": "/Jobs",
+      "api_key": "",
+      "auth_token": "",
+      "rate_limit": 100,
+      "batch_size": 25
+    },
+    "local_ip": {
+      "type": "local",
+      "enabled": true,
+      "base_url": "http://192.168.0.124:8001/api/v1",
+      "endpoint_path": "/Jobs",
+      "api_key": "",
+      "auth_token": "",
+      "rate_limit": 100,
+      "batch_size": 25
+    }
+  },
+  "sync": {
+    "batch_size": 50,
+    "incremental": true,
+    "sync_interval_minutes": 60
+  }
+}
