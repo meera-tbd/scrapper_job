@@ -370,7 +370,7 @@ class JobPortalAdapter:
         self.name = name
         self.config = config
         self.session = self._create_session()
-        
+
     def _create_session(self) -> requests.Session:
         """Create HTTP session with retry strategy."""
         session = requests.Session()
@@ -395,7 +395,7 @@ class JobPortalAdapter:
             headers['Authorization'] = f"Bearer {self.config['api_key']}"
         elif self.config.get('auth_token'):
             headers['Authorization'] = f"Token {self.config['auth_token']}"
-            
+
         session.headers.update(headers)
         return session
     
@@ -763,7 +763,7 @@ class JobDataSynchronizer:
             since = None
             if incremental:
                 sync_interval = timedelta(minutes=self.config['sync']['sync_interval_minutes'])
-                since = start_time - sync_interval
+                since = now_dt - sync_interval
                 self.logger.info(f"Performing incremental sync since {since}")
             
             # Fetch jobs from database

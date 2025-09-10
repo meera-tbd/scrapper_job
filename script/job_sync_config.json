@@ -11,7 +11,7 @@
     "local": {
       "enabled": true,
       "base_url": "https://68badccd84055bce63f06583.mockapi.io/api/v1",
-      "endpoint_path": "/Jobs",
+      "endpoint_path": "/Job",
       "api_key": "",
       "auth_token": "",
       "rate_limit": 100,
@@ -20,12 +20,15 @@
     "local_ip": {
       "type": "local",
       "enabled": true,
-      "base_url": "http://192.168.0.124:8003/api",
+      "base_url": "http://192.168.0.135:8002/api/v1",
       "endpoint_path": "/jobs/",
-      "api_key": "",
+      "api_key": "qJy75mDThIw-dV6vxR6BgAqAUQeA54tOOFbZRabOyOc=",
       "auth_token": "",
       "rate_limit": 100,
-      "batch_size": 25
+      "batch_size": 25,
+      "field_map": {
+        "external_url": "application_url"
+      }
     }
   },
   "sync": {
