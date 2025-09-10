@@ -11,7 +11,15 @@ import sys
 import json
 import argparse
 from datetime import datetime
-from job_data_sync import JobDataSynchronizer
+
+# Ensure this file works both as a script and as an importable module
+CURRENT_DIR = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# Use package-qualified import to avoid ModuleNotFoundError under Celery
+from script.job_data_sync import JobDataSynchronizer
 
 def display_config_summary(config):
     """Display current configuration summary."""
@@ -33,8 +41,10 @@ def display_config_summary(config):
     # Portal info
     print(f"\nEnabled Portals:")
     for portal_name, portal_config in config['portals'].items():
-        if portal_config['enabled']:
-            print(f"  ✓ {portal_name.title()}: {portal_config['base_url']}")
+        is_enabled = isinstance(portal_config, dict) and bool(portal_config.get('enabled', False))
+        if is_enabled:
+            base_url = portal_config.get('base_url', '(no base_url)') if isinstance(portal_config, dict) else '(invalid config)'
+            print(f"  ✓ {portal_name.title()}: {base_url}")
         else:
             print(f"  ✗ {portal_name.title()}: Disabled")
     
@@ -127,7 +137,10 @@ def main():
         limit_text = f" (limit: {limit})" if limit else ""
         print(f"\n📋 {sync_type} Sync{limit_text}")
         
-        enabled_portals = [name for name, config in sync.config['portals'].items() if config['enabled']]
+        enabled_portals = [
+            name for name, p_cfg in sync.config['portals'].items()
+            if isinstance(p_cfg, dict) and p_cfg.get('enabled', False)
+        ]
         print(f"📤 Target Portals: {', '.join(enabled_portals)}")
         
         confirm = input("\nProceed? (Y/n): ").strip().lower()
@@ -164,3 +177,22 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# Non-interactive entrypoint for Celery scheduler
+def run():
+    """Run a non-interactive sync using config in this directory.
+
+    Designed to be called as `script.run_job_sync:run` from the scheduler.
+    - Uses `script/job_sync_config.json` if present
+    - Respects env var `SYNC_FULL=true` to perform a full sync
+    - Otherwise performs incremental sync
+    """
+    # Prefer explicit env-provided config path if given
+    env_cfg = os.getenv('JOB_SYNC_CONFIG')
+    config_path = env_cfg if env_cfg and os.path.exists(env_cfg) else os.path.join(CURRENT_DIR, 'job_sync_config.json')
+    config_file = config_path if os.path.exists(config_path) else None
+
+    sync = JobDataSynchronizer(config_file=config_file)
+    full_env = (os.getenv('SYNC_FULL', 'false').lower() == 'true')
+    return sync.sync_jobs(incremental=not full_env)

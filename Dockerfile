@@ -58,10 +58,10 @@ RUN python -m playwright install chromium || true
 COPY . .
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8004
 
 # Default command
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8004"]
 
 # [cursor:reason] Set default timezone in image; can be overridden by compose env
 ENV TZ=Asia/Kolkata

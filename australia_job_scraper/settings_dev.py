@@ -11,7 +11,7 @@ if os.getenv('DB_HOST'):
             'NAME': os.getenv('DB_NAME', 'australia_job_scraper'),
             'USER': os.getenv('DB_USER', 'postgres'),
             'PASSWORD': os.getenv('DB_PASSWORD', 'Evolgroup@123'),
-            'HOST': os.getenv('DB_HOST', 'host.docker.internal'),
+            'HOST': os.getenv('DB_HOST', 'localhost'),
             'PORT': os.getenv('DB_PORT', '5432'),
         }
     }

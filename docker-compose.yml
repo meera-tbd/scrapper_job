@@ -19,32 +19,36 @@ services:
     image: redis:7-alpine
     container_name: project1_redis
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:6380:6379"  # avoid host port clash with local Redis service
     restart: unless-stopped
 
   web:
     build: .
     container_name: project1_web
     ports:
-      - "8003:8003"    # access via http://<PC-A-LAN-IP>:8003 or http://localhost:8003
+      - "${HOST_IP:-127.0.0.1}:${PORT:-8004}:${PORT:-8004}"    # access via http://${HOST_IP:-127.0.0.1}:${PORT:-8004}
     volumes:
       - .:/app
     env_file:
       - .env
     environment:
-      - DB_HOST=db
+      - DJANGO_SETTINGS_MODULE=australia_job_scraper.settings_dev
+      - RUNNING_IN_DOCKER=1
+      - DB_NAME=${DB_NAME:-australia_job_scraper}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-Evolgroup@123}
+      - DB_HOST=host.docker.internal
       - DB_PORT=5432
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      - db
-      - redis  # [cursor:reason] No longer depend on internal db service
+      - redis  # Use local host Postgres; no dependency on internal db service
     restart: unless-stopped
     command: >
       sh -c "python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8003"
+             python manage.py runserver 0.0.0.0:${PORT:-8004}"
     healthcheck:  # [cursor:reason] Basic healthcheck using wget (available in image)
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8003/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${PORT:-8004}/"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -57,13 +61,17 @@ services:
     env_file:
       - .env
     environment:
-      - DB_HOST=db
+      - DJANGO_SETTINGS_MODULE=australia_job_scraper.settings_dev
+      - RUNNING_IN_DOCKER=1
+      - DB_NAME=${DB_NAME:-australia_job_scraper}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-Evolgroup@123}
+      - DB_HOST=host.docker.internal
       - DB_PORT=5432
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      - db
-      - redis  # [cursor:reason] No longer depend on internal db service
+      - redis  # Use local host Postgres; no dependency on internal db service
     restart: unless-stopped
     command: >
       sh -c "celery -A australia_job_scraper worker -l info"
@@ -81,13 +89,17 @@ services:
     env_file:
       - .env
     environment:
-      - DB_HOST=db
+      - DJANGO_SETTINGS_MODULE=australia_job_scraper.settings_dev
+      - RUNNING_IN_DOCKER=1
+      - DB_NAME=${DB_NAME:-australia_job_scraper}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-Evolgroup@123}
+      - DB_HOST=host.docker.internal
       - DB_PORT=5432
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
-      - db
-      - redis  # [cursor:reason] No longer depend on internal db service
+      - redis  # Use local host Postgres; no dependency on internal db service
     restart: unless-stopped
     command: >
       sh -c "celery -A australia_job_scraper beat -l info"
