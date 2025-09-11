@@ -835,6 +835,14 @@ class JobDataSynchronizer:
             since = None
             if incremental:
                 sync_interval = timedelta(minutes=self.config['sync']['sync_interval_minutes'])
+                try:
+                    if getattr(self.db_connector, 'db_type', '').lower() == 'django':
+                        from django.utils import timezone as _tz
+                        now_dt = _tz.now()
+                    else:
+                        now_dt = datetime.utcnow()
+                except Exception:
+                    now_dt = datetime.utcnow()
                 since = now_dt - sync_interval
                 self.logger.info(f"Performing incremental sync since {since}")
             
