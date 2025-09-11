@@ -396,6 +396,18 @@ class JobPortalAdapter:
         elif self.config.get('auth_token'):
             headers['Authorization'] = f"Token {self.config['auth_token']}"
 
+        # Allow custom headers from config (e.g., X-API-Secret-Key)
+        custom_headers = self.config.get('headers')
+        if isinstance(custom_headers, dict):
+            # Normalize keys to strings and only include simple str/int/bool values
+            for key, value in custom_headers.items():
+                try:
+                    if value is None:
+                        continue
+                    headers[str(key)] = str(value)
+                except Exception:
+                    continue
+
         session.headers.update(headers)
         return session
     
@@ -497,8 +509,68 @@ class LocalPortalAdapter(JobPortalAdapter):
     
     def transform_job_data(self, job_data: Dict) -> Dict:
         """Transform data for local portal format."""
-        # Keep original format or customize as needed
-        return job_data
+        transformed: Dict[str, Any] = dict(job_data)
+
+        company_value: str = (transformed.get('company') or transformed.get('name') or '').strip()
+        if not company_value:
+            company_value = 'Unknown'
+        transformed['company_name'] = company_value
+
+        location_value: str = (transformed.get('location') or '').strip()
+        default_country: str = str(self.config.get('default_country') or 'Australia')
+        default_location: str = str(self.config.get('default_location') or default_country)
+        if not location_value:
+            location_value = default_location
+        transformed['location'] = location_value
+
+        # Country: enforce max 3 characters (use ISO-like 3-letter code). Allow override via config.
+        country_raw: str = str(transformed.get('country') or self.config.get('default_country') or default_country)
+        country_clean: str = country_raw.strip().upper()
+        # Map common full names to 3-letter codes
+        country_map: Dict[str, str] = {
+            'AUSTRALIA': 'AUS',
+            'UNITED STATES': 'USA',
+            'UNITED STATES OF AMERICA': 'USA',
+            'UNITED KINGDOM': 'GBR',
+            'UK': 'GBR',
+            'INDIA': 'IND',
+            'CANADA': 'CAN',
+            'NEW ZEALAND': 'NZL'
+        }
+        if len(country_clean) > 3:
+            country_clean = country_map.get(country_clean, country_clean[:3])
+        transformed['country'] = country_clean
+
+        raw_experience: str = str(transformed.get('experience_level') or '').strip().lower()
+        experience_map: Dict[str, str] = {
+            'senior': 'senior',
+            'sr': 'senior',
+            'mid': 'mid',
+            'intermediate': 'mid',
+            'middle': 'mid',
+            'junior': 'entry',
+            'entry': 'entry',
+            'fresher': 'entry',
+        }
+        normalized_experience: str = ''
+        for key, mapped in experience_map.items():
+            if key in raw_experience:
+                normalized_experience = mapped
+                break
+        if not normalized_experience:
+            normalized_experience = str(self.config.get('default_experience_level') or 'entry')
+        transformed['experience_level'] = normalized_experience
+
+        field_map_cfg: Optional[Dict[str, str]] = self.config.get('field_map') if isinstance(self.config.get('field_map'), dict) else None
+        if field_map_cfg:
+            for source_field, target_field in field_map_cfg.items():
+                try:
+                    if source_field in transformed and target_field:
+                        transformed[target_field] = transformed[source_field]
+                except Exception:
+                    continue
+
+        return transformed
     
     def push_job(self, job_data: Dict) -> Tuple[bool, Optional[Dict]]:
         """Push job to local portal."""

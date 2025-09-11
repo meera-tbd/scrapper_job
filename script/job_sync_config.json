@@ -8,22 +8,16 @@
     "port": 5432
   },
   "portals": {
-    "local": {
-      "enabled": true,
-      "base_url": "https://68badccd84055bce63f06583.mockapi.io/api/v1",
-      "endpoint_path": "/Job",
-      "api_key": "",
-      "auth_token": "",
-      "rate_limit": 100,
-      "batch_size": 25
-    },
     "local_ip": {
       "type": "local",
       "enabled": true,
       "base_url": "http://192.168.0.135:8002/api/v1",
-      "endpoint_path": "/jobs/",
-      "api_key": "qJy75mDThIw-dV6vxR6BgAqAUQeA54tOOFbZRabOyOc=",
+      "endpoint_path": "/jobs/external/create/",
+      "api_key": "",
       "auth_token": "",
+      "headers": {
+        "X-API-Secret-Key": "flyoverseas-external-job-api-secret-key-2025-secure-12345"
+      },
       "rate_limit": 100,
       "batch_size": 25,
       "field_map": {
