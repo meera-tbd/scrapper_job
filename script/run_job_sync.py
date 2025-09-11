@@ -96,7 +96,7 @@ def main():
         print("SYNC OPTIONS:")
         print("1. Full Sync (All jobs)")
         print("2. Incremental Sync (New/updated jobs only)")
-        print("3. Test Sync (Limit to 10 jobs)")
+        print("3. Test Sync (Limit to N jobs)")
         print("4. Custom Sync")
         print("5. Exit")
         
@@ -120,9 +120,15 @@ def main():
             incremental = True
             print("\n🔄 Starting INCREMENTAL SYNC...")
         elif choice == '3':  # Test
-            limit = 10
+            # Allow any numeric limit up to 1000 (default 10)
+            test_limit_input = input("Test limit? (number up to 1000, default 10): ").strip()
+            if test_limit_input.isdigit():
+                limit_val = int(test_limit_input)
+                limit = max(1, min(1000, limit_val))
+            else:
+                limit = 10
             incremental = False
-            print("\n🧪 Starting TEST SYNC (10 jobs)...")
+            print(f"\n🧪 Starting TEST SYNC ({limit} jobs)...")
         elif choice == '4':  # Custom
             print("\nCustom Sync Configuration:")
             full_input = input("Full sync? (y/N): ").strip().lower()
