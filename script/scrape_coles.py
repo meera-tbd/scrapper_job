@@ -18,6 +18,7 @@ import re
 import time
 import random
 import logging
+from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -59,13 +60,13 @@ User = get_user_model()
 
 
 class ColesScraper:
-    def __init__(self, max_jobs: int | None = None, headless: bool = True):
+    def __init__(self, max_jobs: Optional[int] = None, headless: bool = True):
         self.max_jobs = max_jobs
         self.headless = headless
         self.base_url = 'https://colescareers.com.au'
         self.search_url = 'https://colescareers.com.au/au/en/search-results'
-        self.company: Company | None = None
-        self.scraper_user: User | None = None
+        self.company: Optional[Company] = None
+        self.scraper_user: Optional[User] = None
         self.scraped_count = 0
 
     # ---------- Utilities ----------
@@ -92,16 +93,52 @@ class ColesScraper:
         except Exception:
             pass
 
-    def setup_database_objects(self):
-        self.company, _ = Company.objects.get_or_create(
+    def setup_database_objects(self, logo_url='', address_info=None):
+        if address_info is None:
+            address_info = {}
+            
+        self.company, created = Company.objects.get_or_create(
             name='Coles',
             defaults={
                 'description': 'Coles Careers',
                 'website': self.base_url,
                 'company_size': 'enterprise',
-                'logo': ''
+                'logo': logo_url,
+                'address_line1': address_info.get('address_line1', ''),
+                'city': address_info.get('city', ''),
+                'state': address_info.get('state', ''),
+                'postcode': address_info.get('postcode', ''),
+                'country': 'Australia'
             }
         )
+        
+        # Update fields if we found new information and company exists
+        update_fields = []
+        if not created:
+            if logo_url and not self.company.logo:
+                self.company.logo = logo_url
+                update_fields.append('logo')
+                
+            if address_info.get('address_line1') and not self.company.address_line1:
+                self.company.address_line1 = address_info.get('address_line1', '')
+                update_fields.append('address_line1')
+                
+            if address_info.get('city') and not self.company.city:
+                self.company.city = address_info.get('city', '')
+                update_fields.append('city')
+                
+            if address_info.get('state') and not self.company.state:
+                self.company.state = address_info.get('state', '')
+                update_fields.append('state')
+                
+            if address_info.get('postcode') and not self.company.postcode:
+                self.company.postcode = address_info.get('postcode', '')
+                update_fields.append('postcode')
+                
+            if update_fields:
+                self.company.save(update_fields=update_fields)
+                logger.info(f"Updated Coles company fields: {update_fields}")
+            
         self.scraper_user, _ = User.objects.get_or_create(
             username='coles_scraper',
             defaults={
@@ -112,7 +149,7 @@ class ColesScraper:
             }
         )
 
-    def get_or_create_location(self, location_text: str | None) -> Location | None:
+    def get_or_create_location(self, location_text: Optional[str]) -> Optional[Location]:
         if not location_text:
             return None
         raw = (location_text or '').strip()
@@ -163,7 +200,7 @@ class ColesScraper:
             country='Australia',
         )
 
-    def normalize_job_type(self, text: str | None) -> str:
+    def normalize_job_type(self, text: Optional[str]) -> str:
         if not text:
             return 'full_time'
         t = text.lower()
@@ -183,7 +220,7 @@ class ColesScraper:
             return 'permanent'
         return 'full_time'
 
-    def parse_salary(self, raw: str | None) -> dict:
+    def parse_salary(self, raw: Optional[str]) -> dict:
         result = {
             'salary_min': None,
             'salary_max': None,
@@ -219,7 +256,7 @@ class ColesScraper:
                 result['salary_max'] = non_zero[0]
         return result
 
-    def ensure_category_choice(self, display_text: str | None) -> str:
+    def ensure_category_choice(self, display_text: Optional[str]) -> str:
         if not display_text:
             return 'other'
         key = slugify(display_text).replace('-', '_')[:50] or 'other'
@@ -256,6 +293,10 @@ class ColesScraper:
             safe['job_type'] = safe['job_type'][:20]
         if safe.get('salary_currency'):
             safe['salary_currency'] = safe['salary_currency'][:3]
+        if safe.get('skills'):
+            safe['skills'] = safe['skills'][:200]
+        if safe.get('preferred_skills'):
+            safe['preferred_skills'] = safe['preferred_skills'][:200]
         return safe
 
     # ---------- Extraction ----------
@@ -500,7 +541,7 @@ class ColesScraper:
                 # Title-cased or all-caps words without punctuation are likely menu items
                 if all((w.isupper() or (w[:1].isupper() and w[1:].islower())) and w.isalpha() for w in words):
                     continue
-            # Drop short testimonial quotes like “I really thrive...” that are standalone
+            # Drop short testimonial quotes like "I really thrive..." that are standalone
             if re.match(r'^["\u201C].{0,300}["\u201D]$\s*', ln.strip()):
                 continue
             cleaned.append(ln)
@@ -510,6 +551,271 @@ class ColesScraper:
         text = re.sub(r'^(?:[-\u2013\u2014])\s*', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
+
+    def convert_text_to_html(self, text: str) -> str:
+        """Convert cleaned text to proper HTML format."""
+        if not text:
+            return ''
+        
+        lines = text.split('\n')
+        html_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                html_lines.append('<br>')
+                continue
+            
+            # Check if line is a bullet point or list item
+            if re.match(r'^[-•·*]\s+', line) or re.match(r'^\d+\.\s+', line):
+                if not in_list:
+                    html_lines.append('<ul>')
+                    in_list = True
+                # Remove bullet and wrap in list item
+                clean_line = re.sub(r'^[-•·*]\s+', '', line)
+                clean_line = re.sub(r'^\d+\.\s+', '', clean_line)
+                html_lines.append(f'<li>{clean_line}</li>')
+            else:
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                # Check if it's a heading (all caps or starts with capital and has fewer than 6 words)
+                words = line.split()
+                if (line.isupper() and len(words) <= 5) or (line[0].isupper() and len(words) <= 4 and line.endswith(':')):
+                    html_lines.append(f'<h3>{line.rstrip(":")}</h3>')
+                else:
+                    html_lines.append(f'<p>{line}</p>')
+        
+        if in_list:
+            html_lines.append('</ul>')
+        
+        return '\n'.join(html_lines)
+
+    def extract_skills_from_description(self, description: str) -> tuple[str, str]:
+        """Extract skills and preferred skills from job description."""
+        if not description:
+            return '', ''
+        
+        # Convert HTML to text for analysis if needed
+        text = re.sub(r'<[^>]+>', ' ', description).lower()
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Common skill keywords and technologies
+        technical_skills = [
+            # Programming languages
+            'python', 'java', 'javascript', 'typescript', 'c#', 'c++', 'ruby', 'php', 'go', 'kotlin', 'swift',
+            'scala', 'rust', 'dart', 'r', 'matlab', 'sql', 'html', 'css', 'sass', 'less',
+            
+            # Frameworks and libraries
+            'react', 'angular', 'vue', 'nodejs', 'express', 'django', 'flask', 'spring', 'laravel',
+            'rails', 'asp.net', '.net', 'bootstrap', 'jquery', 'webpack', 'babel',
+            
+            # Databases
+            'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch', 'oracle', 'sqlite', 'cassandra',
+            
+            # Cloud and DevOps
+            'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'gitlab', 'github', 'terraform',
+            'ansible', 'chef', 'puppet', 'nginx', 'apache',
+            
+            # Data and Analytics
+            'tableau', 'power bi', 'excel', 'powerpoint', 'word', 'outlook', 'sharepoint', 'salesforce',
+            'hubspot', 'google analytics', 'seo', 'sem', 'adwords',
+            
+            # Other technical
+            'api', 'rest', 'graphql', 'microservices', 'agile', 'scrum', 'kanban', 'jira', 'confluence',
+            'git', 'svn', 'linux', 'windows', 'macos', 'unix'
+        ]
+        
+        soft_skills = [
+            'communication', 'leadership', 'customer service', 'sales', 'negotiation', 'problem solving',
+            'time management', 'attention to detail', 'driving', 'safety', 'first aid', 'data entry',
+            'inventory', 'reporting', 'microsoft office', 'excel', 'word', 'meter reading', 'field work',
+            'physical fitness', 'outdoor work', 'teamwork', 'reliability', 'punctuality', 'multitasking',
+            'organization', 'adaptability', 'initiative', 'creativity', 'analytical thinking',
+            'interpersonal skills', 'collaboration', 'project management', 'strategic thinking',
+            'decision making', 'conflict resolution', 'presentation skills', 'training', 'mentoring'
+        ]
+        
+        retail_skills = [
+            'pos system', 'cash handling', 'inventory management', 'stock control', 'merchandising',
+            'visual merchandising', 'loss prevention', 'customer relations', 'sales targets',
+            'product knowledge', 'upselling', 'cross-selling', 'store operations', 'shift management',
+            'opening procedures', 'closing procedures', 'health and safety', 'food safety',
+            'hygiene standards', 'team supervision', 'staff training', 'roster management'
+        ]
+        
+        all_skills = technical_skills + soft_skills + retail_skills
+        
+        # Find skills mentioned in the description
+        found_skills = []
+        preferred_found = []
+        
+        for skill in all_skills:
+            if skill in text:
+                found_skills.append(skill.title())
+        
+        # Look for preferred/desirable skills sections
+        lines = description.split('\n')
+        preferred_section = False
+        essential_section = False
+        
+        for line in lines:
+            line_lower = line.lower()
+            
+            # Check for section headers
+            if any(word in line_lower for word in ['preferred', 'desirable', 'nice to have', 'bonus', 'advantageous']):
+                preferred_section = True
+                essential_section = False
+                continue
+            elif any(word in line_lower for word in ['essential', 'required', 'must have', 'skills', 'qualifications']):
+                essential_section = True
+                preferred_section = False
+                continue
+            elif line.strip() == '':
+                preferred_section = False
+                essential_section = False
+                continue
+            
+            # Extract skills from current line
+            line_text = line.lower()
+            for skill in all_skills:
+                if skill in line_text:
+                    if preferred_section and skill.title() not in preferred_found:
+                        preferred_found.append(skill.title())
+                    elif essential_section and skill.title() not in found_skills:
+                        found_skills.append(skill.title())
+        
+        # Remove duplicates and limit results
+        found_skills = list(dict.fromkeys(found_skills))[:15]
+        preferred_found = list(dict.fromkeys(preferred_found))[:15]
+        
+        # If no preferred skills found, use some essential skills as preferred
+        if not preferred_found and found_skills:
+            preferred_found = found_skills[-5:] if len(found_skills) > 5 else found_skills.copy()
+        
+        # If no skills found at all, provide defaults based on retail context
+        if not found_skills:
+            found_skills = ['Customer Service', 'Communication', 'Teamwork', 'Time Management', 'POS System']
+            preferred_found = ['Sales', 'Inventory Management', 'Problem Solving', 'Attention To Detail']
+        
+        # Convert to comma-separated strings with length limits
+        skills_str = ', '.join(found_skills)[:200]
+        preferred_str = ', '.join(preferred_found)[:200]
+        
+        return skills_str, preferred_str
+
+    def extract_company_logo(self, page) -> str:
+        """Extract company logo URL from the page."""
+        logo_url = ''
+        
+        try:
+            # Common selectors for company logos
+            logo_selectors = [
+                'img[alt*="logo" i]',
+                'img[src*="logo" i]', 
+                'img[class*="logo" i]',
+                '.company-logo img',
+                '.header-logo img',
+                '.brand-logo img',
+                'header img[src*="coles" i]',
+                'nav img[src*="coles" i]',
+                '.navbar img',
+                'header .logo img'
+            ]
+            
+            for selector in logo_selectors:
+                try:
+                    logo_el = page.query_selector(selector)
+                    if logo_el:
+                        src = logo_el.get_attribute('src')
+                        if src:
+                            # Make URL absolute if relative
+                            if src.startswith('//'):
+                                logo_url = f'https:{src}'
+                            elif src.startswith('/'):
+                                logo_url = f'{self.base_url}{src}'
+                            elif src.startswith('http'):
+                                logo_url = src
+                            else:
+                                logo_url = f'{self.base_url}/{src}'
+                            
+                            # Validate it looks like a logo
+                            if any(term in logo_url.lower() for term in ['logo', 'brand', 'coles']):
+                                break
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Error extracting logo: {e}")
+        
+        return logo_url
+
+    def extract_company_address(self, page) -> dict:
+        """Extract company address information from the page."""
+        address_info = {
+            'address_line1': '',
+            'city': '',
+            'state': '',
+            'postcode': ''
+        }
+        
+        try:
+            # Look for address in footer or contact sections
+            address_selectors = [
+                'footer',
+                '.footer',
+                '.contact',
+                '.address',
+                '.company-details',
+                '.site-footer'
+            ]
+            
+            for selector in address_selectors:
+                try:
+                    element = page.query_selector(selector)
+                    if element:
+                        text = element.inner_text() or ''
+                        
+                        # Look for Australian address pattern
+                        # Pattern: Street Address, Suburb State Postcode
+                        import re
+                        
+                        # Look for Toorak Rd address specifically (as seen in screenshot)
+                        toorak_match = re.search(r'(\d+\s+Toorak\s+Rd?)[,\s]*([A-Za-z\s]+)[,\s]*(VIC|Victoria)[,\s]*(\d{4})', text, re.IGNORECASE)
+                        if toorak_match:
+                            address_info['address_line1'] = toorak_match.group(1).strip()
+                            address_info['city'] = toorak_match.group(2).strip()
+                            address_info['state'] = 'Victoria'
+                            address_info['postcode'] = toorak_match.group(4).strip()
+                            logger.info(f"Found Toorak Rd address: {address_info}")
+                            break
+                        
+                        # General Australian address pattern
+                        address_match = re.search(r'(\d+[^,\n]*(?:Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Lane|Ln)[^,\n]*)[,\s]*([A-Za-z\s]+)[,\s]*(NSW|VIC|QLD|WA|SA|TAS|NT|ACT|New South Wales|Victoria|Queensland|Western Australia|South Australia|Tasmania|Northern Territory|Australian Capital Territory)[,\s]*(\d{4})', text, re.IGNORECASE)
+                        if address_match:
+                            address_info['address_line1'] = address_match.group(1).strip()
+                            address_info['city'] = address_match.group(2).strip()
+                            state_abbrev = {
+                                'NSW': 'New South Wales', 'VIC': 'Victoria', 'QLD': 'Queensland',
+                                'WA': 'Western Australia', 'SA': 'South Australia', 'TAS': 'Tasmania',
+                                'NT': 'Northern Territory', 'ACT': 'Australian Capital Territory'
+                            }
+                            state = address_match.group(3).strip()
+                            address_info['state'] = state_abbrev.get(state.upper(), state)
+                            address_info['postcode'] = address_match.group(4).strip()
+                            logger.info(f"Found address: {address_info}")
+                            break
+                            
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting address: {e}")
+        
+        return address_info
 
     def expand_description_if_collapsed(self, page):
         candidates = [
@@ -691,7 +997,7 @@ class ColesScraper:
             raw = ''
         return self.clean_description(raw)
 
-    def extract_job_from_detail(self, page, job_url: str) -> dict | None:
+    def extract_job_from_detail(self, page, job_url: str) -> Optional[dict]:
         try:
             try:
                 page.goto(job_url, wait_until='networkidle', timeout=60000)
@@ -746,6 +1052,10 @@ class ColesScraper:
                     txt = ''
                 if txt:
                     description = self.clean_description(txt)
+            
+            # Convert cleaned text description to HTML format
+            if description:
+                description = self.convert_text_to_html(description)
             # Append compliance footer (accessibility/disability support), job id, employment type if present anywhere on page
             try:
                 body_text = page.inner_text('body') or ''
@@ -819,6 +1129,9 @@ class ColesScraper:
                 logger.info(f"Skipping (insufficient content): {job_url} | title_ok={bool(title)} desc_len={len(description or '')} body_len={body_len}")
                 return None
 
+            # Extract skills and preferred skills from description
+            skills, preferred_skills = self.extract_skills_from_description(description)
+
             return {
                 'title': title[:200],
                 'description': description.strip()[:8000],
@@ -836,13 +1149,15 @@ class ColesScraper:
                 'work_mode': 'On-site',
                 'posted_ago': '',
                 'category_raw': category_raw,
+                'skills': skills,
+                'preferred_skills': preferred_skills,
             }
         except Exception as e:
             logger.error(f"Error extracting detail from {job_url}: {e}")
             return None
 
     # ---------- Persistence ----------
-    def save_job(self, data: dict) -> JobPosting | None:
+    def save_job(self, data: dict) -> Optional[JobPosting]:
         try:
             with transaction.atomic():
                 safe = self.sanitize_for_model(data)
@@ -872,6 +1187,8 @@ class ColesScraper:
                     posted_ago=safe['posted_ago'],
                     date_posted=safe['date_posted'],
                     tags='',
+                    skills=safe.get('skills', ''),
+                    preferred_skills=safe.get('preferred_skills', ''),
                     additional_info={'scraped_from': 'coles', 'scraper_version': '1.0'}
                 )
                 if safe.get('category_raw'):
@@ -888,15 +1205,49 @@ class ColesScraper:
     # ---------- Orchestration ----------
     def scrape(self) -> int:
         logger.info('Starting Coles scraping...')
-        self.setup_database_objects()
-
+        
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             context = browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
             page = context.new_page()
+            
+            # Extract company logo and address from main page first
+            logo_url = ''
+            address_info = {}
             try:
+                # Go to homepage instead of search page for better company info
+                homepage_url = self.base_url + '/au/en/home'
+                page.goto(homepage_url, wait_until='domcontentloaded', timeout=45000)
+                
+                # Extract logo
+                logo_url = self.extract_company_logo(page)
+                if logo_url:
+                    logger.info(f"Found company logo: {logo_url}")
+                
+                # Extract address
+                address_info = self.extract_company_address(page)
+                if address_info.get('address_line1'):
+                    logger.info(f"Found company address: {address_info}")
+                    
+            except Exception as e:
+                logger.warning(f"Error extracting company info from homepage: {e}")
+                # Fallback to search page
+                try:
+                    page.goto(self.search_url, wait_until='domcontentloaded', timeout=45000)
+                    logo_url = self.extract_company_logo(page)
+                    if logo_url:
+                        logger.info(f"Found company logo from search page: {logo_url}")
+                except Exception as e2:
+                    logger.warning(f"Error extracting from search page: {e2}")
+            
+            # Setup database objects with logo and address
+            self.setup_database_objects(logo_url, address_info)
+            
+            try:
+                # Navigate to search page for job extraction
+                page.goto(self.search_url, wait_until='domcontentloaded', timeout=45000)
                 links = self.extract_job_links_from_search(page)
                 logger.info(f"Found {len(links)} job detail links")
                 if not links:

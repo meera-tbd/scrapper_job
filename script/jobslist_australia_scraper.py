@@ -18,7 +18,8 @@ import re
 import time
 import random
 import logging
-from typing import List, Dict, Any, Set, Tuple
+import html
+from typing import List, Dict, Any, Set, Tuple, Optional
 from datetime import timedelta
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -57,7 +58,7 @@ def human_delay(a: float = 0.8, b: float = 1.8) -> None:
 
 
 class JobsListScraper:
-    def __init__(self, job_limit: int | None = 50, headless: bool = True) -> None:
+    def __init__(self, job_limit: Optional[int] = 50, headless: bool = True) -> None:
         self.start_url = 'https://jobslist.com.au/'
         self.job_limit = job_limit
         self.headless = headless
@@ -75,7 +76,7 @@ class JobsListScraper:
 
     # ---------------------- Parsing helpers ----------------------
     @staticmethod
-    def _parse_relative_date(text: str | None):
+    def _parse_relative_date(text: Optional[str]):
         if not text:
             return None
         low = text.lower()
@@ -99,7 +100,7 @@ class JobsListScraper:
         return None
 
     @staticmethod
-    def _parse_location(text: str | None) -> Tuple[str | None, str, str, str]:
+    def _parse_location(text: Optional[str]) -> Tuple[Optional[str], str, str, str]:
         raw = (text or '').strip()
         if not raw:
             return None, '', '', 'Australia'
@@ -143,7 +144,7 @@ class JobsListScraper:
         return name, city, state, 'Australia'
 
     @staticmethod
-    def _parse_salary(text: str | None) -> Tuple[int | None, int | None, str, str, str]:
+    def _parse_salary(text: Optional[str]) -> Tuple[Optional[int], Optional[int], str, str, str]:
         if not text:
             return None, None, 'AUD', 'yearly', ''
         low = text.lower()
@@ -166,7 +167,7 @@ class JobsListScraper:
         return mn, mx, 'AUD', period, text[:200]
 
     # ---------------------- DOM extraction ----------------------
-    def _extract_job_links(self, page, max_links: int | None) -> List[str]:
+    def _extract_job_links(self, page, max_links: Optional[int]) -> List[str]:
         """Collect job detail links from the listing page."""
         links: List[str] = []
         try:
@@ -250,7 +251,7 @@ class JobsListScraper:
         """
         result: Dict[str, Any] = {
             'title': '', 'company': '', 'location_text': '', 'salary_text': '',
-            'posted_ago': '', 'description': ''
+            'posted_ago': '', 'description': '', 'description_html': ''
         }
         try:
             # Title
@@ -371,7 +372,9 @@ class JobsListScraper:
                     description = (page.inner_text('body') or '').strip()
                 except Exception:
                     description = ''
-            result['description'] = self._clean_description(description)
+            clean_text = self._clean_description(description)
+            result['description'] = clean_text
+            result['description_html'] = self._text_to_html(clean_text)
         except Exception as e:
             logger.warning(f"Detail extraction warning: {e}")
         return result
@@ -390,7 +393,7 @@ class JobsListScraper:
         remove_markers = [
             'login to bookmark this job', 'show more', 'website'
         ]
-        cleaned: list[str] = []
+        cleaned: List[str] = []
         for ln in lines:
             low = ln.lower()
             if any(m in low for m in stop_markers):
@@ -406,6 +409,98 @@ class JobsListScraper:
                 continue
             cleaned.append(ln)
         return '\n'.join(cleaned).strip()
+
+    @staticmethod
+    def _text_to_html(text: str) -> str:
+        """Convert plain text with newlines/bullets into simple semantic HTML.
+        - Wrap paragraphs in <p>
+        - Convert lines starting with -, •, *, – into <ul><li>
+        """
+        if not text:
+            return ''
+        lines = [ln.rstrip() for ln in text.split('\n')]
+        parts: List[str] = []
+        in_ul = False
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped:
+                if in_ul:
+                    parts.append('</ul>')
+                    in_ul = False
+                continue
+            is_bullet = stripped[:1] in {'-', '•', '*', '–'}
+            if is_bullet:
+                if not in_ul:
+                    parts.append('<ul>')
+                    in_ul = True
+                item = stripped.lstrip('-•*– ').strip()
+                parts.append(f'<li>{html.escape(item)}</li>')
+            else:
+                if in_ul:
+                    parts.append('</ul>')
+                    in_ul = False
+                parts.append(f'<p>{html.escape(stripped)}</p>')
+        if in_ul:
+            parts.append('</ul>')
+        return ''.join(parts)
+
+    @staticmethod
+    def _extract_skills_from_description(title: str, description_text: str) -> Tuple[str, str]:
+        """Derive primary and preferred skills from description text.
+        Uses JobCategorizationService keyword extraction and looks for
+        'preferred/nice to have' lines for preferred skills.
+        Returns comma-separated strings.
+        """
+        try:
+            base_keywords: List[str] = JobCategorizationService.get_job_keywords(title, description_text) or []
+        except Exception:
+            base_keywords = []
+
+        # Preferred skills: focus on lines mentioning preference cues
+        cues = (
+            'preferred', 'preferably', 'nice to have', 'nice-to-have', 'bonus', 'plus',
+            'advantage', 'desirable', 'ideally', 'would be a plus', 'optional'
+        )
+        preferred_lines: List[str] = []
+        for ln in (description_text or '').split('\n'):
+            low = ln.lower()
+            if any(c in low for c in cues):
+                preferred_lines.append(ln)
+        preferred_text = '\n'.join(preferred_lines)
+        try:
+            pref_keywords: List[str] = JobCategorizationService.get_job_keywords(title, preferred_text) if preferred_text else []
+        except Exception:
+            pref_keywords = []
+
+        # Fallbacks to guarantee both fields populated
+        if not base_keywords:
+            # As a last resort, derive from title tokens
+            title_tokens = re.findall(r"[A-Za-z][A-Za-z+.#-]{1,}", title or '')
+            base_keywords = [t for t in title_tokens[:10]] if title_tokens else []
+        if not pref_keywords:
+            pref_keywords = list(base_keywords)
+
+        # Deduplicate while preserving order
+        def dedup(seq: List[str]) -> List[str]:
+            seen: Set[str] = set()
+            out: List[str] = []
+            for s in seq:
+                key = s.strip()
+                if not key or key.lower() in seen:
+                    continue
+                seen.add(key.lower())
+                out.append(key)
+            return out
+
+        primary_csv = ', '.join(dedup(base_keywords)[:50])
+        preferred_csv = ', '.join(dedup(pref_keywords)[:50])
+
+        # Ensure neither is empty
+        if not primary_csv and preferred_csv:
+            primary_csv = preferred_csv
+        if not preferred_csv and primary_csv:
+            preferred_csv = primary_csv
+        return primary_csv, preferred_csv
 
     # ---------------------- Persistence ----------------------
     def _save_job(self, job: Dict[str, Any], job_url: str) -> bool:
@@ -442,13 +537,17 @@ class JobsListScraper:
                 smin, smax, currency, period, raw_salary = self._parse_salary(job.get('salary_text'))
 
                 # Category and tags
-                category = JobCategorizationService.categorize_job(title, job.get('description', ''))
-                tags = ', '.join(JobCategorizationService.get_job_keywords(title, job.get('description', ''))[:10])
+                plain_description = job.get('description', '')
+                category = JobCategorizationService.categorize_job(title, plain_description)
+                tags = ', '.join(JobCategorizationService.get_job_keywords(title, plain_description)[:10])
+
+                # Skills and preferred skills derived from description
+                skills_csv, preferred_skills_csv = self._extract_skills_from_description(title, plain_description)
 
                 # Create record (slug auto-created in model.save)
                 JobPosting.objects.create(
                     title=title[:200],
-                    description=(job.get('description') or '')[:8000],
+                    description=(job.get('description_html') or self._text_to_html(plain_description) or '')[:8000],
                     company=company_obj,
                     posted_by=self.system_user,
                     location=location_obj,
@@ -465,7 +564,9 @@ class JobsListScraper:
                     status='active',
                     posted_ago=job.get('posted_ago', '')[:50],
                     date_posted=self._parse_relative_date(job.get('posted_ago')),
-                    tags=tags,
+                    tags=(tags or '')[:200],
+                    skills=(skills_csv or '')[:200],
+                    preferred_skills=(preferred_skills_csv or '')[:200],
                     additional_info={'source': 'jobslist'}
                 )
                 logger.info(f"Saved job: {title} | {company_name} | {location_name or '-'}")

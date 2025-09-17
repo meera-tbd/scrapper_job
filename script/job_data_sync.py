@@ -23,6 +23,8 @@ import sys
 import time
 import logging
 import hashlib
+import socket
+import subprocess
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 import requests
@@ -31,9 +33,108 @@ from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 import sqlite3
 from dataclasses import dataclass
+try:
+    from cryptography.fernet import Fernet
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    ENCRYPTION_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
+
+class SystemInfoCollector:
+    """Collect system identification information for tracking job sync instances."""
+    
+    @staticmethod
+    def get_machine_id() -> str:
+        """Get unique machine ID using motherboard UUID."""
+        try:
+            result = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+            return result if result else 'unknown'
+        except Exception:
+            return 'unknown'
+    
+    @staticmethod
+    def get_host_name() -> str:
+        """Get computer network name."""
+        try:
+            return socket.gethostname()
+        except Exception:
+            return 'unknown'
+    
+    @staticmethod
+    def get_user_name() -> str:
+        """Get Windows login username."""
+        try:
+            return os.getlogin()
+        except Exception:
+            return 'unknown'
+    
+    @staticmethod
+    def collect_system_info() -> Dict[str, str]:
+        """Collect all system identification information."""
+        return {
+            'machine_id': SystemInfoCollector.get_machine_id(),
+            'host_name': SystemInfoCollector.get_host_name(),
+            'windows_login_name': SystemInfoCollector.get_user_name(),
+            'collection_timestamp': datetime.now().isoformat()
+        }
+
+class DataEncryption:
+    """Handle data encryption/decryption for secure job data transmission."""
+    
+    def __init__(self, encryption_key: Optional[str] = None):
+        self.encryption_enabled = ENCRYPTION_AVAILABLE and encryption_key is not None
+        self.key = None
+        if self.encryption_enabled:
+            try:
+                # Handle different key formats
+                if encryption_key and len(encryption_key) == 64:
+                    # Convert 64-char key to Fernet format
+                    import base64
+                    import hashlib
+                    key_hash = hashlib.sha256(encryption_key.encode()).digest()
+                    self.key = base64.urlsafe_b64encode(key_hash)
+                elif encryption_key:
+                    # Use as-is for base64 keys
+                    self.key = encryption_key.encode()
+                else:
+                    # Default key
+                    self.key = b'PWhqmT8_Tq5HRz5vIsoJBU9gBDOloo1qJG3fyzZOwfM='
+                
+                # Test encryption to ensure key is valid
+                Fernet(self.key)
+            except Exception as e:
+                self.encryption_enabled = False
+                self.key = None
+    
+    def encrypt_data(self, data: Dict[str, Any]) -> Optional[bytes]:
+        """Encrypt data payload using Fernet encryption."""
+        if not self.encryption_enabled:
+            return None
+        try:
+            fernet = Fernet(self.key)
+            message = json.dumps(data).encode('utf-8')
+            encrypted_data = fernet.encrypt(message)
+            return encrypted_data
+        except Exception:
+            return None
+    
+    def decrypt_data(self, encrypted_data: bytes) -> Optional[Dict[str, Any]]:
+        """Decrypt data payload using Fernet encryption."""
+        if not self.encryption_enabled:
+            return None
+        try:
+            fernet = Fernet(self.key)
+            decrypted_bytes = fernet.decrypt(encrypted_data)
+            data = json.loads(decrypted_bytes.decode())
+            return data if data else None
+        except Exception:
+            return None
+    
+    def is_enabled(self) -> bool:
+        """Check if encryption is enabled and functional."""
+        return self.encryption_enabled
 
 @dataclass
 class JobData:
@@ -98,6 +199,40 @@ class DatabaseConnector:
             logging.error(f"Failed to setup Django: {exc}")
             raise
 
+    def _safe_get_from_additional_info(self, additional_info, key):
+        """Safely extract a value from additional_info field, handling both dict and string cases."""
+        try:
+            if isinstance(additional_info, dict):
+                return additional_info.get(key, '')
+            elif isinstance(additional_info, str):
+                # Try to parse as JSON
+                try:
+                    parsed = json.loads(additional_info)
+                    if isinstance(parsed, dict):
+                        return parsed.get(key, '')
+                except Exception:
+                    pass
+            return ''
+        except Exception:
+            return ''
+
+    def _safe_normalize_additional_info(self, additional_info):
+        """Safely normalize additional_info field to ensure it's always a dict."""
+        try:
+            if isinstance(additional_info, dict):
+                return additional_info
+            elif isinstance(additional_info, str):
+                # Try to parse as JSON
+                try:
+                    parsed = json.loads(additional_info)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return {}
+        except Exception:
+            return {}
+
     def connect(self):
         """Establish database connection based on type."""
         db_type = self.db_type
@@ -149,10 +284,15 @@ class DatabaseConnector:
         if self.db_type == 'django':
             try:
                 from apps.jobs.models import JobPosting  # type: ignore
+                from django.db.models import Q  # type: ignore
                 # Build queryset
                 qs = JobPosting.objects.select_related('company', 'location', 'posted_by')
                 if since:
-                    qs = qs.filter(updated_at__gte=since)
+                    qs = qs.filter(
+                        Q(updated_at__gte=since) |
+                        Q(scraped_at__gte=since) |
+                        Q(date_posted__gte=since)
+                    )
                 qs = qs.order_by('-scraped_at')
                 if limit:
                     qs = qs[:int(limit)]
@@ -191,12 +331,15 @@ class DatabaseConnector:
                         'location': getattr(obj.location, 'name', '') if obj.location_id else '',
                         'location_id': obj.location_id,
                         'description': obj.description or '',
+                        # Prefer explicit HTML description when available via additional_info
+                        'description_html': self._safe_get_from_additional_info(obj.additional_info, 'description_html'),
 
                         # Job details
                         'category': obj.job_category or 'other',
                         'job_type': obj.job_type or 'full_time',
                         'experience_level': obj.experience_level or '',
                         'work_mode': obj.work_mode or '',
+                        'job_closing_date': getattr(obj, 'job_closing_date', '') or '',
 
                         # Salary details
                         'salary': salary_text,
@@ -223,14 +366,17 @@ class DatabaseConnector:
 
                         # Tags/skills
                         'tags': obj.tags or '',
-                        'skills': [t.strip() for t in (obj.tags or '').split(',') if t.strip()],
+                        #'skills': [t.strip() for t in (obj.tags or '').split(',') if t.strip()],
+                        # Also include raw skills fields from model if present
+                        'skills': getattr(obj, 'skills', '') or '',
+                        'preferred_skills': getattr(obj, 'preferred_skills', '') or '',
 
                         # Associations
                         'posted_by_id': obj.posted_by_id,
                         'posted_by': getattr(obj.posted_by, 'username', '') if getattr(obj, 'posted_by_id', None) else '',
 
                         # Additional
-                        'additional_info': obj.additional_info or {},
+                        'additional_info': self._safe_normalize_additional_info(obj.additional_info),
 
                         # Derived
                         'remote_allowed': remote_allowed,
@@ -561,6 +707,28 @@ class LocalPortalAdapter(JobPortalAdapter):
             normalized_experience = str(self.config.get('default_experience_level') or 'entry')
         transformed['experience_level'] = normalized_experience
 
+        # Ensure preferred_skills is a list (API requires list)
+        try:
+            preferred_value = transformed.get('preferred_skills')
+            if isinstance(preferred_value, list):
+                pass
+            elif isinstance(preferred_value, str):
+                parsed: Any = None
+                try:
+                    parsed = json.loads(preferred_value)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list):
+                    transformed['preferred_skills'] = parsed
+                else:
+                    transformed['preferred_skills'] = [
+                        token.strip() for token in preferred_value.split(',') if token.strip()
+                    ]
+            else:
+                transformed['preferred_skills'] = []
+        except Exception:
+            transformed['preferred_skills'] = []
+
         field_map_cfg: Optional[Dict[str, str]] = self.config.get('field_map') if isinstance(self.config.get('field_map'), dict) else None
         if field_map_cfg:
             for source_field, target_field in field_map_cfg.items():
@@ -636,6 +804,16 @@ class JobDataSynchronizer:
         self.load_config(config_file)
         self.db_connector = DatabaseConnector(self.config['database'])
         self.portals = self._initialize_portals()
+        # Collect system info once at initialization
+        self.system_info = SystemInfoCollector.collect_system_info()
+        self.logger.info(f"System Info - Machine ID: {self.system_info['machine_id'][:8]}..., Host: {self.system_info['host_name']}, User: {self.system_info['windows_login_name']}")
+        # Initialize encryption (optional, falls back gracefully if not available)
+        encryption_key = self.config.get('encryption', {}).get('key')
+        self.encryptor = DataEncryption(encryption_key)
+        if self.encryptor.is_enabled():
+            self.logger.info("Data encryption enabled")
+        else:
+            self.logger.info("Data encryption disabled (not configured or library missing)")
         
     def _ensure_iso_z(self, value: Any) -> str:
         """Return an ISO 8601 string with 'Z' suffix when timezone info is missing."""
@@ -664,6 +842,14 @@ class JobDataSynchronizer:
             return f"https://cdn.jsdelivr.net/gh/faker-js/assets-person-portrait/male/512/{idx}.jpg"
         except Exception:
             return "https://cdn.jsdelivr.net/gh/faker-js/assets-person-portrait/male/512/1.jpg"
+
+    def _aware_now(self) -> datetime:
+        """Return timezone-aware now() when Django timezone is available, else UTC now()."""
+        try:
+            from django.utils import timezone as _tz  # type: ignore
+            return _tz.now()
+        except Exception:
+            return datetime.utcnow()
 
     def _normalize_job_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
         """Ensure required fields exist with sensible defaults for downstream portals."""
@@ -742,8 +928,37 @@ class JobDataSynchronizer:
 
         # Remote flag default
         normalized['remote_allowed'] = bool(normalized.get('remote_allowed', False))
+        
+        # Add system identification info
+        normalized['system_info'] = self.system_info.copy()
 
         return normalized
+
+    def _prepare_payload_for_transmission(self, job_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare job payload for transmission, optionally encrypting if configured."""
+        # If encryption is enabled, encrypt the payload
+        if self.encryptor.is_enabled():
+            encrypted_data = self.encryptor.encrypt_data(job_payload)
+            if encrypted_data:
+                # Ensure proper Base64 encoding for transmission
+                import base64
+                if isinstance(encrypted_data, bytes):
+                    # Double-encode: Fernet already returns Base64, but we need to ensure clean transmission
+                    base64_data = base64.b64encode(encrypted_data).decode('utf-8')
+                else:
+                    base64_data = str(encrypted_data)
+                
+                # Return encrypted payload wrapped in transmission format
+                return {
+                    'encrypted': True,
+                    'data': base64_data,
+                    'timestamp': datetime.now().isoformat()
+                }
+            else:
+                self.logger.warning("Failed to encrypt payload, sending unencrypted")
+        
+        # Return original payload (unencrypted)
+        return job_payload
 
     def setup_logging(self):
         """Setup logging configuration."""
@@ -831,6 +1046,26 @@ class JobDataSynchronizer:
             if not self.db_connector.connect():
                 raise ConnectionError("Failed to connect to database")
             
+            # Try to import Django logging models (available when using Django settings)
+            JobSyncRun = None  # type: ignore
+            JobSyncPortalResult = None  # type: ignore
+            JobSyncJobResult = None  # type: ignore
+            try:
+                from apps.jobs.models import JobSyncRun as _JobSyncRun, JobSyncPortalResult as _JobSyncPortalResult, JobSyncJobResult as _JobSyncJobResult  # type: ignore
+                JobSyncRun = _JobSyncRun
+                JobSyncPortalResult = _JobSyncPortalResult
+                JobSyncJobResult = _JobSyncJobResult
+            except Exception:
+                pass
+            
+            # Create a run row if models are available
+            run_row = None
+            if JobSyncRun:
+                try:
+                    run_row = JobSyncRun.objects.create(incremental=incremental, status='running')  # type: ignore
+                except Exception:
+                    run_row = None
+            
             # Determine sync period for incremental sync
             since = None
             if incremental:
@@ -851,7 +1086,27 @@ class JobDataSynchronizer:
             
             if not jobs:
                 self.logger.info("No new jobs to sync")
-                return {'status': 'success', 'jobs_synced': 0, 'portals': {}}
+                # Update run row if exists
+                if run_row:
+                    try:
+                        run_row.jobs_fetched = 0  # type: ignore
+                        run_row.total_synced = 0  # type: ignore
+                        run_row.status = 'success'  # type: ignore
+                        run_row.finished_at = self._aware_now()  # type: ignore
+                        run_row.save()  # type: ignore
+                    except Exception:
+                        pass
+                # Build a full summary for consistency with success path
+                end_time = datetime.now()
+                return {
+                    'status': 'success',
+                    'start_time': start_time.isoformat(),
+                    'end_time': end_time.isoformat(),
+                    'duration_seconds': (end_time - start_time).total_seconds(),
+                    'jobs_fetched': 0,
+                    'total_synced': 0,
+                    'portals': {}
+                }
             
             # Sync to each portal
             portal_results = {}
@@ -864,19 +1119,103 @@ class JobDataSynchronizer:
                 batch_size = self.config['sync']['batch_size']
                 portal_success = 0
                 portal_failed = 0
+                portal_result_row = None
+                # Compute target URL for this portal if possible
+                target_url = None
+                try:
+                    base = f"{portal_adapter.config.get('base_url','')}".rstrip('/')
+                    endpoint_path = portal_adapter.config.get('endpoint_path')
+                    target_url = f"{base}{endpoint_path}" if endpoint_path else (base or None)
+                except Exception:
+                    target_url = None
+                # Create portal result aggregate if models available
+                if JobSyncPortalResult and run_row:
+                    try:
+                        portal_result_row = JobSyncPortalResult.objects.create(  # type: ignore
+                            run=run_row,
+                            portal_name=str(portal_name),
+                            target_url=str(target_url or ''),
+                            batch_size=int(batch_size)
+                        )
+                    except Exception:
+                        portal_result_row = None
                 
                 for i in range(0, len(jobs), batch_size):
                     batch = jobs[i:i + batch_size]
                     # Normalize each job to guarantee required fields
                     normalized_batch = [self._normalize_job_payload(j) for j in batch]
-                    batch_results = portal_adapter.push_jobs_batch(normalized_batch)
                     
-                    # Count successes and failures
-                    for success, _ in batch_results:
+                    # Push one-by-one so we can log individual results
+                    for job_payload in normalized_batch:
+                        try:
+                            transformed = portal_adapter.transform_job_data(job_payload)
+                            # Apply encryption if enabled (optional, graceful fallback)
+                            final_payload = self._prepare_payload_for_transmission(transformed)
+                        except Exception as _exc:
+                            portal_failed += 1
+                            # Record failed transform
+                            if JobSyncJobResult and run_row and portal_result_row:
+                                try:
+                                    JobSyncJobResult.objects.create(  # type: ignore
+                                        run=run_row,
+                                        portal_result=portal_result_row,
+                                        job_id=str(job_payload.get('id') or job_payload.get('job_id') or ''),
+                                        request_url=str(target_url or ''),
+                                        request_headers=dict(getattr(portal_adapter.session, 'headers', {})),
+                                        request_payload=job_payload,
+                                        response_status=None,
+                                        response_body='transform_error',
+                                        was_success=False,
+                                        error=str(_exc)
+                                    )
+                                except Exception:
+                                    pass
+                            continue
+                        success, info = portal_adapter.push_job(final_payload)
                         if success:
                             portal_success += 1
                         else:
                             portal_failed += 1
+                        # Persist per-job log if models available
+                        if JobSyncJobResult and run_row and portal_result_row:
+                            try:
+                                response_status = None
+                                response_body = ''
+                                request_url = str(target_url or '')
+                                request_headers = dict(getattr(portal_adapter.session, 'headers', {}))
+                                if isinstance(info, dict):
+                                    response_status = info.get('status_code')
+                                    request_url = info.get('url') or request_url
+                                    # Prefer headers from info if provided
+                                    try:
+                                        if isinstance(info.get('headers'), dict):
+                                            request_headers = info.get('headers')  # type: ignore
+                                    except Exception:
+                                        pass
+                                    # Truncate/serialize response body
+                                    if 'response' in info:
+                                        try:
+                                            response_body = json.dumps(info['response'])[:2000]
+                                        except Exception:
+                                            response_body = str(info['response'])[:2000]
+                                    elif 'response_text' in info:
+                                        response_body = str(info['response_text'])[:2000]
+                                    elif 'text' in info:
+                                        response_body = str(info['text'])[:2000]
+                                JobSyncJobResult.objects.create(  # type: ignore
+                                    run=run_row,
+                                    portal_result=portal_result_row,
+                                    job_id=str(job_payload.get('id') or job_payload.get('job_id') or ''),
+                                    request_url=request_url,
+                                    request_headers=request_headers,
+                                    request_payload=final_payload,
+                                    response_status=response_status,
+                                    response_body=response_body,
+                                    was_success=bool(success),
+                                    error='' if success else (str(info)[:1000] if info else '')
+                                )
+                            except Exception:
+                                pass
                     
                     # Small delay between batches
                     time.sleep(1)
@@ -889,6 +1228,15 @@ class JobDataSynchronizer:
                 
                 total_synced += portal_success
                 self.logger.info(f"{portal_name}: {portal_success} success, {portal_failed} failed")
+                # Update aggregate portal result
+                if portal_result_row:
+                    try:
+                        portal_result_row.success_count = int(portal_success)  # type: ignore
+                        portal_result_row.failure_count = int(portal_failed)  # type: ignore
+                        portal_result_row.success_rate = float(portal_success / len(jobs) if jobs else 0.0)  # type: ignore
+                        portal_result_row.save()  # type: ignore
+                    except Exception:
+                        pass
             
             # Summary
             summary = {
@@ -902,10 +1250,29 @@ class JobDataSynchronizer:
             }
             
             self.logger.info(f"Sync completed - {len(jobs)} jobs fetched, {total_synced} total synced")
+            # Update run row
+            if run_row:
+                try:
+                    run_row.jobs_fetched = len(jobs)  # type: ignore
+                    run_row.total_synced = int(total_synced)  # type: ignore
+                    run_row.status = 'success'  # type: ignore
+                    run_row.finished_at = self._aware_now()  # type: ignore
+                    run_row.save()  # type: ignore
+                except Exception:
+                    pass
             return summary
             
         except Exception as e:
             self.logger.error(f"Sync failed: {e}")
+            # Mark run as error if exists
+            try:
+                if 'run_row' in locals() and run_row:
+                    run_row.status = 'error'  # type: ignore
+                    run_row.error_message = str(e)[:1000]  # type: ignore
+                    run_row.finished_at = self._aware_now()  # type: ignore
+                    run_row.save()  # type: ignore
+            except Exception:
+                pass
             return {
                 'status': 'error',
                 'error': str(e),
@@ -945,12 +1312,18 @@ def main():
         print("\n" + "="*60)
         print("JOB SYNCHRONIZATION SUMMARY")
         print("="*60)
-        print(f"Jobs Fetched: {results['jobs_fetched']}")
-        print(f"Total Synced: {results['total_synced']}")
-        print(f"Duration: {results['duration_seconds']:.2f} seconds")
+        jobs_fetched = results.get('jobs_fetched', results.get('jobs_synced', 0))
+        total_synced = results.get('total_synced', 0)
+        duration_seconds = float(results.get('duration_seconds', 0))
+        print(f"Jobs Fetched: {jobs_fetched}")
+        print(f"Total Synced: {total_synced}")
+        print(f"Duration: {duration_seconds:.2f} seconds")
         print("\nPortal Results:")
-        for portal, stats in results['portals'].items():
-            print(f"  {portal}: {stats['success']} success, {stats['failed']} failed ({stats['success_rate']:.1%})")
+        for portal, stats in (results.get('portals') or {}).items():
+            success = stats.get('success', 0)
+            failed = stats.get('failed', 0)
+            success_rate = float(stats.get('success_rate', 0))
+            print(f"  {portal}: {success} success, {failed} failed ({success_rate:.1%})")
     else:
         print(f"Sync failed: {results['error']}")
 

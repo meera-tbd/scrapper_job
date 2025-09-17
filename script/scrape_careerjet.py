@@ -13,6 +13,8 @@ import time
 import random
 import logging
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+import html
 
 # Django setup for this project
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,6 +31,8 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from playwright.sync_api import sync_playwright
+
+from typing import Union, Tuple
 
 from apps.companies.models import Company
 from apps.core.models import Location
@@ -48,14 +52,30 @@ class CareerjetPlaywrightScraper:
         self.headless = headless
         self.scraper_user = self._get_or_create_scraper_user()
         self.logger = logging.getLogger(__name__)
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('careerjet_scraper.log', encoding='utf-8'),
-                logging.StreamHandler(sys.stdout),
-            ],
-        )
+        
+        # Enhanced logging configuration
+        if not self.logger.handlers:  # Avoid duplicate handlers
+            formatter = logging.Formatter(
+                '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            
+            # File handler for detailed logs
+            file_handler = logging.FileHandler('careerjet_scraper.log', encoding='utf-8')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            
+            # Console handler for important messages
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(formatter)
+            
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
+            self.logger.setLevel(logging.DEBUG)
+        
+        # Log initialization
+        self.logger.info(f'🚀 CareerJet scraper initialized: max_jobs={max_jobs}, headless={headless}')
 
     # ----- Model helpers -----
     def _get_or_create_scraper_user(self):
@@ -66,14 +86,14 @@ class CareerjetPlaywrightScraper:
         )
         return user
 
-    def _get_or_create_company(self, company_name: str | None) -> Company:
+    def _get_or_create_company(self, company_name: Union[str, None]) -> Company:
         name = (company_name or '').strip() or 'Unknown Company'
         existing = Company.objects.filter(name__iexact=name).first()
         if existing:
             return existing
         return Company.objects.create(name=name, company_size='medium')
 
-    def _get_or_create_location(self, location_text: str | None) -> Location | None:
+    def _get_or_create_location(self, location_text: Union[str, None]) -> Union[Location, None]:
         text = (location_text or '').strip()
         if not text:
             return None
@@ -86,7 +106,7 @@ class CareerjetPlaywrightScraper:
         return Location.objects.create(name=text, city=city, state=state, country='Australia')
 
     # ----- Parsing helpers -----
-    def _parse_relative_date(self, raw: str | None) -> datetime:
+    def _parse_relative_date(self, raw: Union[str, None]) -> datetime:
         if not raw:
             return timezone.now()
         s = raw.strip().lower()
@@ -121,7 +141,7 @@ class CareerjetPlaywrightScraper:
             return 'internship'
         return 'full_time'
 
-    def _parse_salary_values(self, salary_text: str) -> tuple[int | None, int | None, str, str]:
+    def _parse_salary_values(self, salary_text: str) -> Tuple[Union[int, None], Union[int, None], str, str]:
         if not salary_text:
             return None, None, 'AUD', 'yearly'
         try:
@@ -157,6 +177,445 @@ class CareerjetPlaywrightScraper:
             if m and 4 <= len(m.group(0)) <= 80:
                 return m.group(0)
         return ''
+
+    def _clean_html_description(self, html_content: str) -> str:
+        """
+        Clean and format HTML content for better readability while preserving structure.
+        Returns properly formatted HTML that maintains job description structure.
+        """
+        if not html_content:
+            return ''
+        
+        try:
+            # Parse HTML with BeautifulSoup
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Remove unwanted tags completely
+            for tag in soup(['script', 'style', 'meta', 'link', 'head', 'noscript', 'iframe']):
+                tag.decompose()
+            
+            # Remove comments
+            for comment in soup.find_all(string=lambda text: isinstance(text, soup.__class__) and text.string):
+                comment.extract()
+            
+            # Clean up attributes but keep essential ones for structure
+            allowed_attrs = ['href', 'src', 'alt', 'title', 'class']
+            for tag in soup.find_all(True):
+                # Remove most attributes except essential ones
+                attrs_to_remove = []
+                for attr in tag.attrs:
+                    if attr not in allowed_attrs:
+                        attrs_to_remove.append(attr)
+                for attr in attrs_to_remove:
+                    del tag.attrs[attr]
+                
+                # Remove empty class attributes
+                if 'class' in tag.attrs and not tag.attrs['class']:
+                    del tag.attrs['class']
+            
+            # Convert div elements with list-like content to proper lists
+            for div in soup.find_all('div'):
+                if div.get_text().strip() and ('•' in div.get_text() or '-' in div.get_text()[:50]):
+                    # Check if this div contains bullet-like content
+                    text = div.get_text().strip()
+                    if re.search(r'[•·▪▫◦‣⁃-]\s*[^\n•·▪▫◦‣⁃-]+', text):
+                        # Convert to list format
+                        items = re.split(r'[•·▪▫◦‣⁃]\s*', text)
+                        items = [item.strip() for item in items if item.strip()]
+                        if len(items) > 1:
+                            ul_tag = soup.new_tag('ul')
+                            for item in items[1:]:  # Skip first empty item
+                                li_tag = soup.new_tag('li')
+                                li_tag.string = item
+                                ul_tag.append(li_tag)
+                            div.replace_with(ul_tag)
+            
+            # Convert line breaks to proper paragraph structure
+            for br in soup.find_all('br'):
+                br.replace_with('\n')
+            
+            # Clean up empty tags
+            for tag in soup.find_all():
+                if not tag.get_text().strip() and not tag.find('img'):
+                    tag.decompose()
+            
+            # Get the cleaned HTML
+            cleaned_html = str(soup)
+            
+            # Final cleanup of excessive whitespace
+            cleaned_html = re.sub(r'\n\s*\n', '\n', cleaned_html)
+            cleaned_html = re.sub(r'>\s+<', '><', cleaned_html)
+            
+            # If the result is mostly text, wrap in paragraphs
+            if not soup.find(['ul', 'ol', 'li', 'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                paragraphs = cleaned_html.split('\n\n')
+                if len(paragraphs) > 1:
+                    para_html = ''
+                    for para in paragraphs:
+                        para = para.strip()
+                        if para:
+                            para_html += f'<p>{para}</p>'
+                    cleaned_html = para_html
+            
+            return cleaned_html.strip()
+                
+        except Exception as e:
+            self.logger.warning(f'Error in HTML cleaning: {e}')
+            # Fallback to basic HTML cleaning
+            text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+            text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+            text = re.sub(r'<[^>]+>', '', text)
+            text = html.unescape(text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+
+    def _extract_skills_from_description(self, description_text: str) -> tuple[str, str]:
+        """
+        Enhanced extraction of skills and preferred skills from job description text.
+        Returns tuple of (skills, preferred_skills) as comma-separated strings.
+        """
+        if not description_text:
+            return '', ''
+        
+        # Convert HTML to text for skills analysis if needed
+        text_for_analysis = description_text
+        if '<' in description_text and '>' in description_text:
+            try:
+                soup = BeautifulSoup(description_text, 'html.parser')
+                text_for_analysis = soup.get_text()
+            except Exception:
+                text_for_analysis = re.sub(r'<[^>]+>', '', description_text)
+        
+        text_lower = text_for_analysis.lower()
+        
+        # Comprehensive skills database with categorization
+        technical_skills = {
+            # Programming languages
+            'python': ['python', 'py', 'python3'],
+            'java': ['java', 'j2ee', 'spring framework'],
+            'javascript': ['javascript', 'js', 'ecmascript', 'node.js', 'nodejs'],
+            'typescript': ['typescript', 'ts'],
+            'c++': ['c++', 'cpp', 'c plus plus'],
+            'c#': ['c#', 'c sharp', 'csharp', '.net'],
+            'php': ['php', 'php7', 'php8'],
+            'ruby': ['ruby', 'ruby on rails', 'rails'],
+            'go': ['go', 'golang'],
+            'rust': ['rust'],
+            'scala': ['scala'],
+            'kotlin': ['kotlin'],
+            'swift': ['swift', 'ios development'],
+            'r': ['r programming', 'r language'],
+            'matlab': ['matlab'],
+            'perl': ['perl'],
+            'powershell': ['powershell', 'ps1'],
+            'bash': ['bash', 'shell scripting', 'unix shell'],
+            
+            # Web technologies
+            'html': ['html', 'html5'],
+            'css': ['css', 'css3'],
+            'sass': ['sass', 'scss'],
+            'less': ['less'],
+            'bootstrap': ['bootstrap'],
+            'tailwind': ['tailwind', 'tailwindcss'],
+            'react': ['react', 'reactjs', 'react.js'],
+            'angular': ['angular', 'angularjs'],
+            'vue': ['vue', 'vue.js', 'vuejs'],
+            'svelte': ['svelte'],
+            'jquery': ['jquery'],
+            'express': ['express', 'express.js'],
+            'django': ['django'],
+            'flask': ['flask'],
+            'fastapi': ['fastapi'],
+            'spring': ['spring', 'spring boot'],
+            'asp.net': ['asp.net', 'aspnet'],
+            'laravel': ['laravel'],
+            'symfony': ['symfony'],
+            
+            # Databases
+            'sql': ['sql', 'structured query language'],
+            'mysql': ['mysql'],
+            'postgresql': ['postgresql', 'postgres'],
+            'sqlite': ['sqlite'],
+            'oracle': ['oracle', 'oracle db'],
+            'sql server': ['sql server', 'mssql'],
+            'mongodb': ['mongodb', 'mongo'],
+            'redis': ['redis'],
+            'elasticsearch': ['elasticsearch', 'elastic search'],
+            'cassandra': ['cassandra'],
+            'dynamodb': ['dynamodb'],
+            'neo4j': ['neo4j'],
+            
+            # Cloud & DevOps
+            'aws': ['aws', 'amazon web services'],
+            'azure': ['azure', 'microsoft azure'],
+            'gcp': ['gcp', 'google cloud platform', 'google cloud'],
+            'docker': ['docker', 'containerization'],
+            'kubernetes': ['kubernetes', 'k8s'],
+            'jenkins': ['jenkins'],
+            'gitlab ci': ['gitlab ci', 'gitlab'],
+            'github actions': ['github actions'],
+            'terraform': ['terraform'],
+            'ansible': ['ansible'],
+            'puppet': ['puppet'],
+            'chef': ['chef'],
+            'vagrant': ['vagrant'],
+            'helm': ['helm'],
+            'ci/cd': ['ci/cd', 'continuous integration', 'continuous deployment'],
+            
+            # Version control
+            'git': ['git', 'version control'],
+            'github': ['github'],
+            'gitlab': ['gitlab'],
+            'bitbucket': ['bitbucket'],
+            'svn': ['svn', 'subversion'],
+            
+            # Methodologies
+            'agile': ['agile', 'agile methodology'],
+            'scrum': ['scrum'],
+            'kanban': ['kanban'],
+            'devops': ['devops'],
+            'tdd': ['tdd', 'test driven development'],
+            'bdd': ['bdd', 'behavior driven development'],
+            
+            # Data & Analytics
+            'machine learning': ['machine learning', 'ml', 'artificial intelligence', 'ai'],
+            'data science': ['data science', 'data analysis'],
+            'big data': ['big data'],
+            'tableau': ['tableau'],
+            'power bi': ['power bi', 'powerbi'],
+            'apache spark': ['apache spark', 'spark'],
+            'hadoop': ['hadoop'],
+            'kafka': ['kafka', 'apache kafka'],
+            'airflow': ['airflow', 'apache airflow'],
+            'pandas': ['pandas'],
+            'numpy': ['numpy'],
+            'scikit-learn': ['scikit-learn', 'sklearn'],
+            'tensorflow': ['tensorflow'],
+            'pytorch': ['pytorch'],
+            
+            # Microsoft Office
+            'excel': ['excel', 'microsoft excel', 'ms excel'],
+            'powerpoint': ['powerpoint', 'microsoft powerpoint'],
+            'word': ['word', 'microsoft word', 'ms word'],
+            'outlook': ['outlook', 'microsoft outlook'],
+            'sharepoint': ['sharepoint'],
+            'teams': ['teams', 'microsoft teams'],
+            'office 365': ['office 365', 'o365'],
+            
+            # Testing
+            'selenium': ['selenium'],
+            'cypress': ['cypress'],
+            'jest': ['jest'],
+            'junit': ['junit'],
+            'pytest': ['pytest'],
+            'postman': ['postman'],
+            'jmeter': ['jmeter'],
+            
+            # Design
+            'figma': ['figma'],
+            'sketch': ['sketch'],
+            'adobe creative suite': ['adobe creative suite', 'adobe cs'],
+            'photoshop': ['photoshop', 'adobe photoshop'],
+            'illustrator': ['illustrator', 'adobe illustrator'],
+            'ui/ux': ['ui/ux', 'user experience', 'user interface design', 'ux design', 'ui design'],
+        }
+        
+        # Enhanced business/soft skills
+        business_skills = {
+            'communication': ['communication', 'verbal communication', 'written communication'],
+            'leadership': ['leadership', 'team leadership', 'people management'],
+            'project management': ['project management', 'pmp', 'project coordination'],
+            'teamwork': ['teamwork', 'collaboration', 'team player'],
+            'problem solving': ['problem solving', 'analytical thinking', 'critical thinking'],
+            'customer service': ['customer service', 'client relations'],
+            'sales': ['sales', 'business development'],
+            'marketing': ['marketing', 'digital marketing'],
+            'negotiation': ['negotiation', 'negotiating'],
+            'time management': ['time management', 'prioritization'],
+            'strategic planning': ['strategic planning', 'strategic thinking'],
+            'budgeting': ['budgeting', 'budget management'],
+            'financial analysis': ['financial analysis', 'financial modeling'],
+            'presentation skills': ['presentation skills', 'public speaking'],
+            'training': ['training', 'coaching'],
+            'mentoring': ['mentoring', 'mentorship'],
+            'stakeholder management': ['stakeholder management'],
+            'change management': ['change management'],
+            'risk management': ['risk management'],
+            'business analysis': ['business analysis', 'requirements analysis'],
+            'process improvement': ['process improvement', 'lean', 'six sigma'],
+            'quality assurance': ['quality assurance', 'qa', 'quality control'],
+            'vendor management': ['vendor management', 'supplier management'],
+            'contract negotiation': ['contract negotiation'],
+        }
+        
+        # Enhanced qualifications and certifications
+        qualifications = {
+            'bachelor\'s degree': ['bachelor', 'bachelor\'s', 'undergraduate degree'],
+            'master\'s degree': ['master', 'master\'s', 'masters', 'graduate degree'],
+            'phd': ['phd', 'doctorate', 'doctoral degree'],
+            'certification': ['certification', 'certified'],
+            'diploma': ['diploma'],
+            'associate degree': ['associate degree'],
+            'cpa': ['cpa', 'certified public accountant'],
+            'pmp': ['pmp', 'project management professional'],
+            'cissp': ['cissp'],
+            'cisa': ['cisa'],
+            'cism': ['cism'],
+            'aws certified': ['aws certified', 'aws certification'],
+            'microsoft certified': ['microsoft certified', 'mcse', 'mcsa'],
+            'cisco certified': ['cisco certified', 'ccna', 'ccnp'],
+            'prince2': ['prince2'],
+            'itil': ['itil'],
+            'six sigma': ['six sigma', 'lean six sigma'],
+            'scrum master': ['scrum master', 'certified scrum master', 'csm'],
+            'product owner': ['product owner', 'certified product owner'],
+        }
+        
+        # Combine all skills
+        all_skills_dict = {**technical_skills, **business_skills, **qualifications}
+        
+        found_skills = []
+        preferred_skills = []
+        
+        # Enhanced skill detection with multiple aliases and variations
+        for main_skill, aliases in all_skills_dict.items():
+            skill_found = False
+            for alias in aliases:
+                # Create flexible pattern for variations
+                alias_escaped = re.escape(alias.lower())
+                # Allow for slight variations in spacing and punctuation
+                alias_pattern = alias_escaped.replace('\\ ', r'[\s\-\._]*')
+                skill_pattern = r'\b' + alias_pattern + r'\b'
+                
+                if re.search(skill_pattern, text_lower):
+                    skill_found = True
+                    break
+            
+            if skill_found:
+                # Use the main skill name for consistency
+                skill_title = main_skill.title()
+                if skill_title not in found_skills:
+                    found_skills.append(skill_title)
+        
+        # Enhanced preferred skills detection with context analysis
+        preferred_indicators = [
+            'preferred', 'nice to have', 'bonus', 'plus', 'advantage', 'desirable',
+            'would be great', 'additional', 'ideal candidate', 'nice-to-have',
+            'beneficial', 'optional', 'recommended', 'a plus', 'helpful',
+            'preferred qualifications', 'nice to haves', 'bonus points',
+            'would be an advantage', 'advantageous', 'valued', 'appreciated',
+            'welcome', 'asset', 'strong plus', 'considered an asset'
+        ]
+        
+        required_indicators = [
+            'required', 'must have', 'essential', 'mandatory', 'necessary',
+            'minimum', 'minimum requirements', 'critical', 'key requirements',
+            'core requirements', 'fundamental', 'imperative'
+        ]
+        
+        # Analyze text structure and extract skills by context
+        # Split into sections for better context analysis
+        sections = re.split(r'\n\s*(?=[A-Z][^:]*:|\d+\.|\•|\-)', text_for_analysis)
+        
+        for section in sections:
+            section_lower = section.lower()
+            
+            # Determine if this section is about preferred or required skills
+            is_preferred_section = any(indicator in section_lower for indicator in preferred_indicators)
+            is_required_section = any(indicator in section_lower for indicator in required_indicators)
+            
+            # Extract skills from this section
+            section_skills = []
+            for main_skill, aliases in all_skills_dict.items():
+                for alias in aliases:
+                    alias_pattern = r'\b' + re.escape(alias.lower()).replace('\\ ', r'[\s\-\._]*') + r'\b'
+                    if re.search(alias_pattern, section_lower):
+                        skill_title = main_skill.title()
+                        if skill_title not in section_skills:
+                            section_skills.append(skill_title)
+            
+            # Classify skills based on section context
+            for skill in section_skills:
+                if is_preferred_section:
+                    if skill not in preferred_skills:
+                        preferred_skills.append(skill)
+                    # Remove from required if it was there
+                    if skill in found_skills:
+                        found_skills.remove(skill)
+                elif not is_required_section:
+                    # If not clearly marked as either, keep in required skills
+                    if skill not in found_skills and skill not in preferred_skills:
+                        found_skills.append(skill)
+        
+        # Look for skills in structured lists (HTML or plain text)
+        list_patterns = [
+            r'<li[^>]*>(.*?)</li>',  # HTML list items
+            r'[•·▪▫◦‣⁃]\s*([^\n]+)',  # Bullet points
+            r'^\s*[-–—]\s*([^\n]+)',  # Dash items
+            r'^\s*\d+\.\s*([^\n]+)',  # Numbered items
+        ]
+        
+        list_items = []
+        for pattern in list_patterns:
+            matches = re.findall(pattern, description_text, re.MULTILINE | re.IGNORECASE)
+            list_items.extend(matches)
+        
+        # Analyze each list item for skills and preferred indicators
+        for item in list_items:
+            item_lower = item.lower().strip()
+            
+            # Check if this item indicates preferred skills
+            has_preferred_indicator = any(indicator in item_lower for indicator in preferred_indicators)
+            
+            # Extract skills from this item
+            item_skills = []
+            for main_skill, aliases in all_skills_dict.items():
+                for alias in aliases:
+                    alias_pattern = r'\b' + re.escape(alias.lower()).replace('\\ ', r'[\s\-\._]*') + r'\b'
+                    if re.search(alias_pattern, item_lower):
+                        skill_title = main_skill.title()
+                        if skill_title not in item_skills:
+                            item_skills.append(skill_title)
+            
+            # Classify the skills found in this item
+            for skill in item_skills:
+                if has_preferred_indicator:
+                    if skill not in preferred_skills:
+                        preferred_skills.append(skill)
+                    if skill in found_skills:
+                        found_skills.remove(skill)
+                else:
+                    if skill not in found_skills and skill not in preferred_skills:
+                        found_skills.append(skill)
+        
+        # Remove duplicates while preserving order
+        found_skills = list(dict.fromkeys(found_skills))
+        preferred_skills = list(dict.fromkeys(preferred_skills))
+        
+        # Intelligent balancing of skills
+        # If we have too many required skills, move some to preferred
+        if len(found_skills) > 10:
+            # Identify advanced/specialized skills to move to preferred
+            advanced_skills = [
+                'Machine Learning', 'Artificial Intelligence', 'Kubernetes', 'Terraform',
+                'Elasticsearch', 'Apache Spark', 'Hadoop', 'Kafka', 'Docker'
+            ]
+            
+            skills_to_move = []
+            for skill in found_skills:
+                if skill in advanced_skills and len(skills_to_move) < 3:
+                    skills_to_move.append(skill)
+            
+            for skill in skills_to_move:
+                preferred_skills.append(skill)
+                found_skills.remove(skill)
+        
+        # Limit to reasonable numbers
+        found_skills = found_skills[:15]  # Max 15 required skills
+        preferred_skills = preferred_skills[:12]  # Max 12 preferred skills
+        
+        return ', '.join(found_skills), ', '.join(preferred_skills)
 
     def _extract_from_jsonld(self, page) -> dict:
         """Extract company, location, salary, employmentType from JobPosting JSON-LD if present."""
@@ -373,7 +832,7 @@ class CareerjetPlaywrightScraper:
                 seen.add(u)
         return unique
 
-    def _parse_job_detail(self, page, url: str, listing_meta: dict | None = None) -> dict | None:
+    def _parse_job_detail(self, page, url: str, listing_meta: Union[dict, None] = None) -> Union[dict, None]:
         try:
             self.logger.info(f'Opening job detail: {url}')
             page.goto(url, wait_until='networkidle', timeout=35000)
@@ -403,23 +862,50 @@ class CareerjetPlaywrightScraper:
         if not title or len(title) < 5:
             return None
 
-        # Description
+        # Description - Extract as HTML to preserve formatting and clean it properly
         description = ''
+        description_html = ''
         for sel in [
             '.job-description', '.description', '.content', '.job-content', '.job-detail',
-            '.jobad-description', '#jobad-description', 'main', 'article', '[class*="description"]',
+            '.jobad-description', '#jobad-description', '[class*="description"]', 'main', 'article',
         ]:
             try:
                 el = page.query_selector(sel)
                 if el:
-                    text = (el.inner_text() or '').strip()
-                    if len(text) > 200:
-                        description = text
+                    # Get HTML content for storage
+                    raw_html = (el.inner_html() or '').strip()
+                    # Get text content for validation and skills extraction
+                    text_content = (el.inner_text() or '').strip()
+                    
+                    if len(text_content) > 200:
+                        # Clean and format the HTML properly
+                        description_html = self._clean_html_description(raw_html)
+                        description = text_content
+                        
+                        # Log description extraction success with quality metrics
+                        html_structure_score = len(description_html) / len(text_content) if text_content else 0
+                        self.logger.info(f'📄 Description extracted: {len(text_content)} chars, HTML ratio: {html_structure_score:.2f}')
+                        if html_structure_score > 1.5:
+                            self.logger.info('   → Rich HTML structure preserved')
+                        elif html_structure_score > 1.2:
+                            self.logger.info('   → Moderate HTML structure preserved')
+                        else:
+                            self.logger.info('   → Minimal HTML structure')
                         break
-            except Exception:
+            except Exception as e:
+                self.logger.warning(f'Error extracting description from {sel}: {e}')
                 continue
+                
+        # Fallback to body content if no specific description element found
         if not description:
-            description = (page.inner_text('body') or '').strip()
+            try:
+                description = (page.inner_text('body') or '').strip()
+                raw_body_html = (page.inner_html('body') or '').strip()
+                description_html = self._clean_html_description(raw_body_html)
+                self.logger.info('Using body content as fallback for description')
+            except Exception:
+                description = ''
+                description_html = ''
 
         # Prefer structured data if present
         jsonld = self._extract_from_jsonld(page)
@@ -509,52 +995,156 @@ class CareerjetPlaywrightScraper:
         if not job_type and listing_meta:
             job_type = self._detect_job_type(' '.join([listing_meta.get('posted', ''), listing_meta.get('salary', '')]))
 
+        # Extract skills and preferred skills from description
+        skills, preferred_skills = self._extract_skills_from_description(description)
+
+        # Enhanced logging for skills extraction
+        skills_count = len([s.strip() for s in skills.split(',') if s.strip()]) if skills else 0
+        preferred_count = len([s.strip() for s in preferred_skills.split(',') if s.strip()]) if preferred_skills else 0
+        
+        self.logger.info(f'📊 Skills extraction results for "{title}":')
+        self.logger.info(f'   → Required skills ({skills_count}): {skills[:100]}{"..." if len(skills) > 100 else ""}')
+        self.logger.info(f'   → Preferred skills ({preferred_count}): {preferred_skills[:100]}{"..." if len(preferred_skills) > 100 else ""}')
+        self.logger.info(f'   → Description length: {len(description)} chars')
+        
+        # Validate skills extraction quality
+        if skills_count == 0 and preferred_count == 0:
+            self.logger.warning(f'⚠️  No skills extracted from job: {title}')
+        elif skills_count > 0:
+            self.logger.info(f'✓ Good skills extraction: {skills_count + preferred_count} total skills found')
+        
         return {
             'title': title,
-            'description': description,
+            'description': description_html if description_html else description,  # Use cleaned HTML if available
+            'description_text': description,  # Keep text version for compatibility and skills extraction
+            'description_html': description_html,  # Store HTML separately for reference
             'company': company_text,
             'location': location_text,
             'job_url': url,
             'posted_ago': posted_ago,
             'salary_text': salary_text,
             'job_type': job_type,
+            'skills': skills,
+            'preferred_skills': preferred_skills,
         }
 
     def _save_job(self, data: dict) -> bool:
+        """
+        Save job posting to database with proper data validation and error handling.
+        Enhanced to ensure skills and preferred_skills are properly stored.
+        """
         try:
             with transaction.atomic():
+                # Check for duplicate
                 if JobPosting.objects.filter(external_url=data['job_url']).exists():
+                    self.logger.debug(f'Job already exists: {data["job_url"]}')
                     return False
+                
+                # Validate required fields
+                if not data.get('title') or len(data['title'].strip()) < 3:
+                    self.logger.warning(f'Invalid job title: {data.get("title")}')
+                    return False
+                
+                if not data.get('description') or len(data['description'].strip()) < 50:
+                    self.logger.warning(f'Description too short for job: {data.get("title")}')
+                    return False
+                
+                # Get or create related objects
                 company = self._get_or_create_company(data.get('company'))
                 location = self._get_or_create_location(data.get('location'))
+                
                 # Parse salary only if we have a trustworthy salary text
                 raw_salary = data.get('salary_text', '').strip()
                 smin, smax, currency, period = (None, None, 'AUD', 'yearly')
                 if raw_salary:
                     smin, smax, currency, period = self._parse_salary_values(raw_salary)
-                JobPosting.objects.create(
-                    title=data['title'],
-                    description=data['description'],
+                
+                # Process skills data with validation
+                skills = data.get('skills', '').strip()
+                preferred_skills = data.get('preferred_skills', '').strip()
+                
+                # Ensure skills fields don't exceed database field limits
+                if len(skills) > 200:
+                    # Truncate skills while preserving complete skill names
+                    skill_list = [s.strip() for s in skills.split(',') if s.strip()]
+                    truncated_skills = []
+                    current_length = 0
+                    for skill in skill_list:
+                        if current_length + len(skill) + 2 <= 200:  # +2 for comma and space
+                            truncated_skills.append(skill)
+                            current_length += len(skill) + 2
+                        else:
+                            break
+                    skills = ', '.join(truncated_skills)
+                    self.logger.warning(f'Skills truncated for job {data["title"]}: {len(skill_list)} -> {len(truncated_skills)} skills')
+                
+                if len(preferred_skills) > 200:
+                    # Truncate preferred skills while preserving complete skill names
+                    pref_skill_list = [s.strip() for s in preferred_skills.split(',') if s.strip()]
+                    truncated_pref_skills = []
+                    current_length = 0
+                    for skill in pref_skill_list:
+                        if current_length + len(skill) + 2 <= 200:  # +2 for comma and space
+                            truncated_pref_skills.append(skill)
+                            current_length += len(skill) + 2
+                        else:
+                            break
+                    preferred_skills = ', '.join(truncated_pref_skills)
+                    self.logger.warning(f'Preferred skills truncated for job {data["title"]}: {len(pref_skill_list)} -> {len(truncated_pref_skills)} skills')
+                
+                # Count skills for reporting
+                skills_count = len([s.strip() for s in skills.split(',') if s.strip()]) if skills else 0
+                preferred_skills_count = len([s.strip() for s in preferred_skills.split(',') if s.strip()]) if preferred_skills else 0
+                
+                # Prepare additional info with comprehensive metadata
+                additional_info = {
+                    'scraped_from': 'careerjet.com.au',
+                    'scraper_version': '2.0',
+                    'description_html': data.get('description_html', ''),
+                    'description_text': data.get('description_text', ''),
+                    'skills_count': skills_count,
+                    'preferred_skills_count': preferred_skills_count,
+                    'total_skills_extracted': skills_count + preferred_skills_count,
+                    'has_structured_description': bool('<' in data.get('description', '') and '>' in data.get('description', '')),
+                    'extraction_quality': 'high' if skills_count > 3 else 'medium' if skills_count > 0 else 'low'
+                }
+                
+                # Create JobPosting with enhanced data validation
+                job_posting = JobPosting.objects.create(
+                    title=data['title'][:200],  # Ensure title doesn't exceed field limit
+                    description=data['description'],  # This will be the cleaned HTML or text
                     company=company,
                     location=location,
                     posted_by=self.scraper_user,
-                    job_category='other',
+                    job_category='other',  # Could be enhanced with category detection
                     job_type=data.get('job_type', 'full_time'),
                     salary_min=smin,
                     salary_max=smax,
                     salary_currency=currency,
                     salary_type=period,
-                    salary_raw_text=raw_salary,
+                    salary_raw_text=raw_salary[:200] if raw_salary else '',  # Ensure field limit
                     external_source='careerjet.com.au',
                     external_url=data['job_url'],
-                    posted_ago=data.get('posted_ago', ''),
+                    posted_ago=data.get('posted_ago', '')[:50],  # Ensure field limit
                     date_posted=self._parse_relative_date(data.get('posted_ago', '')),
                     status='active',
-                    additional_info={'scraped_from': 'careerjet.com.au'},
+                    skills=skills,  # Validated and truncated if necessary
+                    preferred_skills=preferred_skills,  # Validated and truncated if necessary
+                    additional_info=additional_info,
                 )
-            return True
-        except Exception:
-            self.logger.exception('Failed to save job')
+                
+                # Log successful save with comprehensive details
+                self.logger.info(f'✓ Successfully saved job: "{data["title"]}" at {company.name}')
+                self.logger.info(f'  → Skills: {skills_count} required, {preferred_skills_count} preferred')
+                self.logger.info(f'  → Description length: {len(data.get("description", ""))} chars')
+                self.logger.info(f'  → Location: {location.name if location else "N/A"}')
+                if raw_salary:
+                    self.logger.info(f'  → Salary: {raw_salary}')
+                
+                return True
+                
+        except Exception as e:
+            self.logger.exception(f'Failed to save job "{data.get("title", "Unknown")}": {str(e)}')
             return False
 
     def scrape(self) -> list[dict]:
@@ -623,7 +1213,26 @@ class CareerjetPlaywrightScraper:
                 browser.close()
             except Exception:
                 pass
-        self.logger.info(f'Scraping finished. Saved {len(saved_jobs)} jobs.')
+        
+        # Enhanced completion logging with statistics
+        total_found = len(urls)
+        success_rate = (len(saved_jobs) / total_found * 100) if total_found > 0 else 0
+        
+        self.logger.info(f'🎯 Scraping completed successfully!')
+        self.logger.info(f'   → Jobs found: {total_found}')
+        self.logger.info(f'   → Jobs saved: {len(saved_jobs)}')
+        self.logger.info(f'   → Success rate: {success_rate:.1f}%')
+        
+        if saved_jobs:
+            # Calculate skills statistics
+            total_skills = sum(len([s.strip() for s in job.get('skills', '').split(',') if s.strip()]) for job in saved_jobs)
+            total_preferred = sum(len([s.strip() for s in job.get('preferred_skills', '').split(',') if s.strip()]) for job in saved_jobs)
+            avg_skills = total_skills / len(saved_jobs) if saved_jobs else 0
+            avg_preferred = total_preferred / len(saved_jobs) if saved_jobs else 0
+            
+            self.logger.info(f'   → Average skills per job: {avg_skills:.1f} required, {avg_preferred:.1f} preferred')
+            self.logger.info(f'   → Total skills extracted: {total_skills + total_preferred}')
+        
         return saved_jobs
 
 

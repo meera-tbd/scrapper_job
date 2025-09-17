@@ -16,6 +16,8 @@ import re
 import time
 import random
 import logging
+import json
+from typing import Union, Optional
 from urllib.parse import urljoin, urlparse
 
 # Django setup (same convention as other scrapers in this repo)
@@ -43,6 +45,8 @@ from apps.core.models import Location
 from apps.jobs.models import JobPosting
 from apps.jobs.services import JobCategorizationService
 
+# Skills generation using text analysis - no external dependencies needed
+
 
 # Logging
 logging.basicConfig(
@@ -61,28 +65,86 @@ User = get_user_model()
 class ProgrammedScraper:
     """Playwright-based scraper for Programmed job postings."""
 
-    def __init__(self, max_jobs: int | None = None, headless: bool = True):
+    def __init__(self, max_jobs: Optional[int] = None, headless: bool = True):
         self.max_jobs = max_jobs
         self.headless = headless
         self.base_url = "https://www.jobs.programmed.com.au"
         self.search_url = f"{self.base_url}/jobs/"
-        self.company: Company | None = None
-        self.scraper_user: User | None = None
+        self.company: Optional[Company] = None
+        self.scraper_user: Optional[User] = None
         self.scraped_count = 0
 
     def human_like_delay(self, min_s=0.8, max_s=2.0):
         time.sleep(random.uniform(min_s, max_s))
 
+    def extract_company_logo(self) -> str:
+        """Extract company logo URL from the current page."""
+        if not hasattr(self, 'page') or not self.page:
+            return ''
+        
+        try:
+            # Look for common logo selectors on Programmed website
+            logo_selectors = [
+                'img[alt*="Programmed" i]',
+                'img[alt*="PERSOL" i]', 
+                'img[src*="logo" i]',
+                'img[src*="programmed" i]',
+                '.logo img',
+                '.header img',
+                '.brand img',
+                'header img',
+                'nav img',
+                # Fallback: look for any image in header/nav area
+                'header img[src*=".png"], header img[src*=".jpg"], header img[src*=".svg"]',
+                'nav img[src*=".png"], nav img[src*=".jpg"], nav img[src*=".svg"]'
+            ]
+            
+            for selector in logo_selectors:
+                try:
+                    logo_element = self.page.query_selector(selector)
+                    if logo_element:
+                        src = logo_element.get_attribute('src')
+                        if src:
+                            # Convert relative URL to absolute URL
+                            if src.startswith('//'):
+                                logo_url = f"https:{src}"
+                            elif src.startswith('/'):
+                                logo_url = f"{self.base_url}{src}"
+                            elif src.startswith('http'):
+                                logo_url = src
+                            else:
+                                logo_url = urljoin(self.base_url, src)
+                            
+                            # Validate it's a reasonable logo URL
+                            if any(ext in logo_url.lower() for ext in ['.png', '.jpg', '.jpeg', '.svg', '.gif']):
+                                logger.info(f"Found company logo: {logo_url}")
+                                return logo_url
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting company logo: {e}")
+            
+        return ''
+
     def setup_database_objects(self):
-        self.company, _ = Company.objects.get_or_create(
+        # Extract company logo if not already set
+        logo_url = self.extract_company_logo() if hasattr(self, 'page') else ''
+        
+        self.company, created = Company.objects.get_or_create(
             name="Programmed",
             defaults={
                 'description': "Programmed | PERSOL Programmed",
                 'website': self.base_url,
                 'company_size': 'enterprise',
-                'logo': ''
+                'logo': logo_url
             }
         )
+        
+        # Update logo if company exists but logo is empty
+        if not created and not self.company.logo and logo_url:
+            self.company.logo = logo_url
+            self.company.save(update_fields=['logo'])
         self.scraper_user, _ = User.objects.get_or_create(
             username='programmed_scraper',
             defaults={
@@ -93,7 +155,7 @@ class ProgrammedScraper:
             }
         )
 
-    def get_or_create_location(self, location_text: str | None) -> Location | None:
+    def get_or_create_location(self, location_text: Optional[str]) -> Optional[Location]:
         """Return an existing `Location` or create one from a noisy string.
 
         Accepts inputs that may contain extra UI text. Extracts a best-effort
@@ -188,7 +250,7 @@ class ProgrammedScraper:
         )
         return location
 
-    def normalize_job_type(self, text: str | None) -> str:
+    def normalize_job_type(self, text: Optional[str]) -> str:
         if not text:
             return 'full_time'
         t = text.lower()
@@ -206,7 +268,7 @@ class ProgrammedScraper:
             return 'freelance'
         return 'full_time'
 
-    def parse_salary(self, raw: str | None) -> dict:
+    def parse_salary(self, raw: Optional[str]) -> dict:
         """Parse salary amounts robustly and avoid picking postcodes or unrelated numbers.
 
         Strategy:
@@ -279,7 +341,7 @@ class ProgrammedScraper:
             JobPosting.JOB_CATEGORY_CHOICES.append((key, display_text.strip()))
         return key
 
-    def map_category(self, raw: str | None) -> str:
+    def map_category(self, raw: Optional[str]) -> str:
         if not raw:
             return 'other'
         t = raw.strip().lower().replace('&amp;', '&')
@@ -394,19 +456,28 @@ class ProgrammedScraper:
     def clean_description(self, text: str) -> str:
         if not text:
             return ''
+            
+        # First, remove any HTML tags that might have leaked through
+        import html as html_lib
+        text = html_lib.unescape(text)  # Decode HTML entities
+        text = re.sub(r'<[^>]+>', '', text)  # Remove all HTML tags
+        
         lines = [ln.strip() for ln in text.split('\n')]
         cleaned = []
         drop_exact = {
             'Apply Now', 'Save', 'Share', 'Print', 'Share via', 'Email', 'Post', 'Tweet',
-            'Register', 'Visit FAQs', 'See more results'
+            'Register', 'Visit FAQs', 'See more results', 'Consultant', 'Reference number'
         }
         drop_contains = (
             'Ready to make your next move? Apply now',
             'To learn more about life at PERSOL',
             'follow us on LinkedIn',
             'Reach your potential',
-            'We’re finding workers for hundreds of immediately available jobs',
+            "We're finding workers for hundreds of immediately available jobs",
             'Powered by',
+            'Reference number:',
+            'Profession:',
+            '@programmed.com.au'
         )
         for ln in lines:
             if not ln or ln in drop_exact:
@@ -415,12 +486,18 @@ class ProgrammedScraper:
                 continue
             if any(s.lower() in ln.lower() for s in drop_contains):
                 continue
+            # Skip lines that are just email addresses or reference numbers
+            if re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', ln.strip()):
+                continue
+            if re.match(r'^\d{8,}$', ln.strip()):  # Skip reference numbers
+                continue
             cleaned.append(ln)
         text = '\n'.join(cleaned)
+        
         # Hard cut at first sign of similar/related jobs to avoid polling in description
         cut_markers = [
             'Similar jobs', 'Similar Jobs', 'Recommended jobs', 'More jobs', 'You might also like',
-            'Related jobs', 'Other opportunities'
+            'Related jobs', 'Other opportunities', 'Consultant', 'Reference number'
         ]
         low = text.lower()
         cut_at = None
@@ -430,8 +507,496 @@ class ProgrammedScraper:
                 cut_at = i if cut_at is None else min(cut_at, i)
         if cut_at is not None:
             text = text[:cut_at].rstrip()
+            
+        # Clean up extra whitespace
         text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
+        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces to single space
+        text = text.strip()
+        
+        return text
+
+    def clean_html_description(self, html: str) -> str:
+        """Clean HTML description while preserving basic formatting."""
+        if not html:
+            return ''
+        
+        # Remove unwanted HTML elements and content
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove complex CSS framework classes and Vue.js attributes
+        html = re.sub(r'\s+class="[^"]*"', '', html)  # Remove all CSS classes
+        html = re.sub(r'\s+data-[^=]*="[^"]*"', '', html)  # Remove data attributes
+        html = re.sub(r'\s+v-[^=]*="[^"]*"', '', html)  # Remove Vue.js attributes
+        html = re.sub(r'\s+aria-[^=]*="[^"]*"', '', html)  # Remove ARIA attributes
+        html = re.sub(r'\s+role="[^"]*"', '', html)  # Remove role attributes
+        html = re.sub(r'\s+focusable="[^"]*"', '', html)  # Remove focusable attributes
+        html = re.sub(r'\s+xmlns="[^"]*"', '', html)  # Remove xmlns
+        html = re.sub(r'\s+viewBox="[^"]*"', '', html)  # Remove viewBox
+        html = re.sub(r'\s+id="[^"]*"', '', html)  # Remove IDs
+        
+        # Remove SVG elements completely (icons, etc.)
+        html = re.sub(r'<svg[^>]*>.*?</svg>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove specific unwanted elements
+        html = re.sub(r'<div[^>]*af-app[^>]*>.*?</div>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<a[^>]*href="#"[^>]*>.*?</a>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove unwanted content patterns
+        drop_patterns = [
+            r'Apply Now', r'Save', r'Share', r'Print', r'Register', r'See more results',
+            r'Ready to make your next move\? Apply now',
+            r'To learn more about life at PERSOL',
+            r'follow us on LinkedIn',
+            r'Reach your potential',
+            r'We\'re finding workers for hundreds of immediately available jobs',
+            r'Powered by', r'Consultant', r'Reference number:', r'Profession:'
+        ]
+        
+        for pattern in drop_patterns:
+            html = re.sub(pattern, '', html, flags=re.IGNORECASE)
+        
+        # Clean up nested divs and spans with no meaningful attributes
+        html = re.sub(r'<div[^>]*>\s*', '<div>', html)  # Clean div opening tags
+        html = re.sub(r'<span[^>]*>\s*', '<span>', html)  # Clean span opening tags
+        
+        # Remove excessive nested empty containers
+        for _ in range(10):  # Multiple passes to handle deeply nested structures
+            html = re.sub(r'<div>\s*<div>', '<div>', html)
+            html = re.sub(r'</div>\s*</div>', '</div>', html)
+            html = re.sub(r'<span>\s*<span>', '<span>', html)
+            html = re.sub(r'</span>\s*</span>', '</span>', html)
+            html = re.sub(r'<div>\s*</div>', '', html)  # Remove empty divs
+            html = re.sub(r'<span>\s*</span>', '', html)  # Remove empty spans
+        
+        # Clean up extra whitespace and normalize
+        html = re.sub(r'\s+', ' ', html)  # Normalize whitespace
+        html = re.sub(r'>\s+<', '><', html)  # Remove whitespace between tags
+        html = html.strip()
+        
+        # If the result is still too complex, extract just the text content with basic HTML
+        if len(html) > 5000 or html.count('<div>') > 20:
+            # Extract meaningful text and convert to simple HTML
+            text_content = re.sub(r'<[^>]+>', ' ', html)  # Strip all HTML
+            text_content = re.sub(r'\s+', ' ', text_content).strip()  # Normalize whitespace
+            
+            # Convert back to simple HTML with basic formatting
+            paragraphs = text_content.split('\n\n')
+            simple_html = ''
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    if '•' in para or para.startswith('-'):
+                        # Convert to list
+                        items = [item.strip().lstrip('•-').strip() for item in para.split('\n') if item.strip()]
+                        if items:
+                            simple_html += '<ul>'
+                            for item in items:
+                                if item:
+                                    simple_html += f'<li>{item}</li>'
+                            simple_html += '</ul>'
+                    else:
+                        simple_html += f'<p>{para}</p>'
+            
+            return simple_html or html
+        
+        return html
+
+    def convert_text_to_html(self, text: str) -> str:
+        """Convert plain text to basic HTML format."""
+        if not text:
+            return ''
+        
+        # Clean the text first
+        text = self.clean_description(text)
+        
+        # Split into paragraphs and convert to HTML
+        paragraphs = text.split('\n\n')
+        html_parts = []
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+                
+            # Check if it's a list (contains bullet points or dashes)
+            if '•' in para or para.count('\n-') > 1 or para.count('\n*') > 1:
+                lines = para.split('\n')
+                list_items = []
+                for line in lines:
+                    line = line.strip().lstrip('•-*').strip()
+                    if line:
+                        list_items.append(f'<li>{line}</li>')
+                if list_items:
+                    html_parts.append(f'<ul>{"".join(list_items)}</ul>')
+            else:
+                # Regular paragraph
+                # Convert line breaks within paragraph to <br> tags
+                para_html = para.replace('\n', '<br>')
+                html_parts.append(f'<p>{para_html}</p>')
+        
+        return ''.join(html_parts)
+
+    def extract_clean_html_content(self, html: str) -> str:
+        """
+        Extract clean, readable HTML content from complex modern web app HTML.
+        This method specifically handles the complex nested structure from Programmed's website.
+        """
+        if not html:
+            return ''
+        
+        try:
+            # First, use the existing clean_html_description method
+            cleaned_html = self.clean_html_description(html)
+            
+            # If it's still too complex, extract text and rebuild as simple HTML
+            if len(cleaned_html) > 3000 or cleaned_html.count('<div>') > 15:
+                # Extract just the text content
+                import html as html_lib
+                
+                # Decode HTML entities first
+                text = html_lib.unescape(html)
+                
+                # Remove all HTML tags but preserve structure markers
+                text = re.sub(r'<li[^>]*>', '\n• ', text)  # Convert list items to bullet points
+                text = re.sub(r'</li>', '\n', text)
+                text = re.sub(r'<p[^>]*>', '\n\n', text)  # Paragraphs
+                text = re.sub(r'</p>', '\n', text)
+                text = re.sub(r'<br[^>]*/?>', '\n', text)  # Line breaks
+                text = re.sub(r'<strong[^>]*>', '**', text)  # Bold start
+                text = re.sub(r'</strong>', '**', text)  # Bold end
+                text = re.sub(r'<em[^>]*>', '*', text)  # Italic start
+                text = re.sub(r'</em>', '*', text)  # Italic end
+                text = re.sub(r'<[^>]+>', '', text)  # Remove all other HTML tags
+                
+                # Clean up the text
+                text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Multiple newlines to double
+                text = re.sub(r'^\s+', '', text, flags=re.MULTILINE)  # Remove leading whitespace
+                text = text.strip()
+                
+                # Convert back to simple HTML
+                paragraphs = text.split('\n\n')
+                simple_html = ''
+                
+                for para in paragraphs:
+                    para = para.strip()
+                    if not para:
+                        continue
+                        
+                    # Handle bullet points
+                    if '•' in para:
+                        lines = para.split('\n')
+                        simple_html += '<ul>'
+                        for line in lines:
+                            line = line.strip()
+                            if line and ('•' in line or line.startswith('-')):
+                                # Clean the bullet point
+                                clean_line = line.lstrip('•-').strip()
+                                if clean_line:
+                                    simple_html += f'<li>{clean_line}</li>'
+                        simple_html += '</ul>'
+                    else:
+                        # Regular paragraph
+                        # Convert **bold** to <strong>
+                        para = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', para)
+                        # Convert *italic* to <em>
+                        para = re.sub(r'\*(.*?)\*', r'<em>\1</em>', para)
+                        simple_html += f'<p>{para}</p>'
+                
+                return simple_html
+            
+            return cleaned_html
+            
+        except Exception as e:
+            logger.warning(f"Error extracting clean HTML content: {e}")
+            # Fallback: just clean the HTML normally
+            return self.clean_html_description(html)
+
+    def generate_skills_from_description(self, description: str) -> tuple:
+        """
+        Extract skills and preferred_skills from job description using pattern matching.
+        Returns a tuple of (skills, preferred_skills).
+        """
+        logger.info(f"Starting skills generation from description (length: {len(description) if description else 0})")
+        
+        if not description or len(description.strip()) < 30:
+            logger.warning("Description too short or empty for skills generation")
+            return '', ''
+        
+        return self.extract_skills_from_text(description)
+
+    def extract_skills_from_text(self, description: str) -> tuple:
+        """
+        Comprehensive skills extraction from job description text.
+        """
+        logger.info("Extracting skills from job description text")
+        
+        # Convert to lowercase for matching
+        desc_lower = description.lower()
+        
+        # Comprehensive skills database - GREATLY EXPANDED
+        technical_skills = {
+            'programming': ['Python', 'Java', 'JavaScript', 'C++', 'C#', 'PHP', 'Ruby', 'Swift', 'Kotlin', 'TypeScript', 'Scala', 'R', 'MATLAB', 'VB.NET', 'Perl', 'Go', 'Rust'],
+            'web': ['HTML', 'CSS', 'React', 'Angular', 'Vue.js', 'jQuery', 'Bootstrap', 'Sass', 'LESS', 'Webpack', 'Node.js', 'Express.js', 'Next.js', 'Nuxt.js'],
+            'frameworks': ['Django', 'Flask', 'Spring', 'Laravel', 'Express', 'Rails', 'ASP.NET', '.NET Core', '.NET', 'Hibernate', 'Entity Framework'],
+            'databases': ['SQL', 'MySQL', 'PostgreSQL', 'MongoDB', 'Redis', 'Oracle', 'SQLite', 'Cassandra', 'DynamoDB', 'SQL Server', 'MariaDB', 'Firebase'],
+            'cloud': ['AWS', 'Azure', 'Google Cloud', 'GCP', 'Docker', 'Kubernetes', 'Jenkins', 'Terraform', 'Ansible', 'CloudFormation', 'Serverless'],
+            'office_software': ['Excel', 'PowerBI', 'Tableau', 'PowerPoint', 'Word', 'Outlook', 'Access', 'OneNote', 'SharePoint', 'Teams', 'Slack'],
+            'enterprise_software': ['Salesforce', 'SAP', 'Oracle ERP', 'Dynamics 365', 'ServiceNow', 'Workday', 'HubSpot', 'Zendesk'],
+            'methodologies': ['Agile', 'Scrum', 'DevOps', 'CI/CD', 'TDD', 'Kanban', 'Waterfall', 'Lean', 'Six Sigma', 'ITIL', 'PRINCE2'],
+            'systems': ['Linux', 'Windows', 'MacOS', 'Unix', 'Ubuntu', 'CentOS', 'Red Hat', 'Active Directory', 'VMware', 'Hyper-V'],
+            'business_skills': ['Project Management', 'Business Analysis', 'Data Analysis', 'Customer Service', 'Sales', 'Marketing', 'Accounting', 'Finance', 'Administration', 'Operations', 'Strategy', 'Planning'],
+            'soft_skills': ['Communication', 'Leadership', 'Teamwork', 'Problem Solving', 'Time Management', 'Attention to Detail', 'Critical Thinking', 'Analytical Skills', 'Interpersonal Skills', 'Adaptability'],
+            'certifications': ['PMP', 'CISSP', 'CISA', 'CPA', 'CFA', 'MBA', 'Degree', 'Certificate', 'Certification', 'MCSE', 'CCNA', 'CompTIA', 'AWS Certified'],
+            'industry_specific': ['Manufacturing', 'Healthcare', 'Retail', 'Logistics', 'Transport', 'Mining', 'Construction', 'Engineering', 'Legal', 'Education', 'Government'],
+            'technical_skills': ['Troubleshooting', 'Technical Support', 'Network Administration', 'System Administration', 'Database Administration', 'Security', 'Testing', 'Quality Assurance'],
+            'creative_skills': ['Design', 'Graphics', 'Adobe', 'Photoshop', 'Illustrator', 'InDesign', 'Creative Suite', 'UI/UX', 'User Experience', 'User Interface'],
+            'data_skills': ['Analytics', 'Business Intelligence', 'Data Mining', 'Machine Learning', 'AI', 'Artificial Intelligence', 'Statistics', 'Reporting', 'Visualization'],
+            'compliance_skills': ['Compliance', 'Audit', 'Regulatory', 'Risk Management', 'Governance', 'Policy', 'Procedures', 'Documentation'],
+            'driving_skills': ['Driver License', 'Driving License', 'CDL', 'Commercial License', 'Forklift', 'Heavy Vehicle', 'Truck', 'Van'],
+            'trade_skills': ['Electrical', 'Plumbing', 'Carpentry', 'Welding', 'Mechanical', 'HVAC', 'Maintenance', 'Repair', 'Installation'],
+            'language_skills': ['English', 'Bilingual', 'Multilingual', 'Translation', 'Interpretation', 'Writing', 'Editing', 'Proofreading']
+        }
+        
+        # Skills that typically indicate requirements
+        required_indicators = [
+            'must have', 'required', 'essential', 'mandatory', 'experience with', 'proficiency in',
+            'strong knowledge', 'expertise in', 'minimum', 'at least', 'years of experience'
+        ]
+        
+        # Skills that typically indicate preferences
+        preferred_indicators = [
+            'preferred', 'desirable', 'nice to have', 'bonus', 'advantage', 'plus', 'beneficial',
+            'ideally', 'would be great', 'additional', 'favorable'
+        ]
+        
+        required_skills = []
+        preferred_skills = []
+        all_found_skills = []
+        
+        # Find all skills mentioned using improved pattern matching
+        for category, skills_list in technical_skills.items():
+            for skill in skills_list:
+                skill_lower = skill.lower()
+                # Multiple matching approaches for better coverage
+                
+                # 1. Exact word boundary match
+                pattern1 = r'\b' + re.escape(skill_lower) + r'\b'
+                
+                # 2. Match with common variations (plurals, common abbreviations)
+                skill_variations = [skill_lower]
+                if not skill_lower.endswith('s'):
+                    skill_variations.append(skill_lower + 's')  # plural
+                if skill_lower.endswith('ing'):
+                    skill_variations.append(skill_lower[:-3])  # remove -ing
+                
+                # 3. Handle common skill name variations
+                if skill_lower == 'microsoft office':
+                    skill_variations.extend(['ms office', 'office suite'])
+                elif skill_lower == 'customer service':
+                    skill_variations.extend(['customer support', 'client service'])
+                elif skill_lower == 'project management':
+                    skill_variations.extend(['project manager', 'pm experience'])
+                elif skill_lower == 'data analysis':
+                    skill_variations.extend(['data analyst', 'data analytics'])
+                elif skill_lower == 'problem solving':
+                    skill_variations.extend(['problem-solving', 'troubleshooting'])
+                    
+                # Check all variations
+                found = False
+                for variation in skill_variations:
+                    pattern = r'\b' + re.escape(variation) + r'\b'
+                    if re.search(pattern, desc_lower):
+                        all_found_skills.append(skill)
+                        found = True
+                        break
+                
+                # 4. Partial matching for compound skills (more relaxed)
+                if not found and len(skill.split()) > 1:
+                    # For multi-word skills, check if all words appear close to each other
+                    words = skill_lower.split()
+                    if len(words) == 2:
+                        word1, word2 = words
+                        # Look for both words within 10 words of each other
+                        pattern_close = rf'\b{re.escape(word1)}\b.{{0,50}}\b{re.escape(word2)}\b|\b{re.escape(word2)}\b.{{0,50}}\b{re.escape(word1)}\b'
+                        if re.search(pattern_close, desc_lower):
+                            all_found_skills.append(skill)
+                            found = True
+        
+        # Split description into sections for better analysis
+        description_sections = re.split(r'\n\s*\n|\n\s*[-•]\s*', description)
+        
+        # Look for section headers that indicate preferences
+        preferred_sections = []
+        required_sections = []
+        
+        for i, section in enumerate(description_sections):
+            section_lower = section.lower().strip()
+            if any(indicator in section_lower for indicator in ['preferred', 'desirable', 'nice to have', 'bonus', 'plus', 'advantage']):
+                preferred_sections.append(section)
+            elif any(indicator in section_lower for indicator in ['required', 'must have', 'essential', 'mandatory', 'experience', 'skills', 'qualifications']):
+                required_sections.append(section)
+            else:
+                required_sections.append(section)  # Default to required
+        
+        # Categorize skills based on which section they appear in
+        for skill in all_found_skills:
+            skill_lower = skill.lower()
+            found_in_preferred = False
+            found_in_required = False
+            
+            # Check preferred sections first
+            for section in preferred_sections:
+                pattern = r'\b' + re.escape(skill_lower) + r'\b'
+                if re.search(pattern, section.lower()):
+                    found_in_preferred = True
+                    break
+            
+            # Check required sections
+            for section in required_sections:
+                pattern = r'\b' + re.escape(skill_lower) + r'\b'
+                if re.search(pattern, section.lower()):
+                    found_in_required = True
+                    break
+            
+            # Categorize based on where found
+            if found_in_preferred and skill not in preferred_skills:
+                preferred_skills.append(skill)
+            elif found_in_required and skill not in required_skills:
+                required_skills.append(skill)
+            elif not found_in_preferred and not found_in_required and skill not in required_skills:
+                # Default: add to required
+                required_skills.append(skill)
+        
+        # FALLBACK EXTRACTION: If no skills found, use more aggressive pattern matching
+        if len(all_found_skills) == 0:
+            logger.info("No skills found with standard matching, applying fallback extraction")
+            fallback_skills = self.fallback_skills_extraction(description)
+            all_found_skills.extend(fallback_skills)
+            # For fallback skills, split evenly between required and preferred
+            mid = len(all_found_skills) // 2
+            required_skills = all_found_skills[:mid] if mid > 0 else all_found_skills
+            preferred_skills = all_found_skills[mid:] if mid > 0 else []
+        
+        # Balance skills between required and preferred
+        if len(preferred_skills) == 0 and len(required_skills) > 3:
+            # If no preferred skills found, move half to preferred
+            mid = len(required_skills) // 2
+            preferred_skills = required_skills[mid:]
+            required_skills = required_skills[:mid]
+        elif len(required_skills) > 15:
+            # If too many required skills, move overflow to preferred
+            overflow = required_skills[10:]
+            required_skills = required_skills[:10]
+            preferred_skills.extend(overflow)
+        
+        # Ensure we have at least some skills for every job
+        if len(required_skills) == 0 and len(preferred_skills) == 0:
+            logger.info("Still no skills found, using generic skill inference")
+            generic_skills = self.infer_generic_skills_from_title_and_description(description)
+            if generic_skills:
+                required_skills = generic_skills[:3]  # Max 3 generic required
+                preferred_skills = generic_skills[3:6]  # Max 3 generic preferred
+        
+        # Remove duplicates and format
+        required_skills = list(dict.fromkeys(required_skills))  # Remove duplicates while preserving order
+        preferred_skills = list(dict.fromkeys(preferred_skills))
+        
+        # Convert to strings
+        required_str = ', '.join(required_skills)[:190]
+        preferred_str = ', '.join(preferred_skills)[:190]
+        
+        logger.info(f"Extracted {len(required_skills)} required and {len(preferred_skills)} preferred skills")
+        logger.info(f"Required: {required_str[:100]}...")
+        logger.info(f"Preferred: {preferred_str[:100]}...")
+        
+        return required_str, preferred_str
+
+    def fallback_skills_extraction(self, description: str) -> list:
+        """
+        Fallback method to extract skills when primary extraction fails.
+        Uses more aggressive pattern matching and keyword detection.
+        """
+        fallback_skills = []
+        desc_lower = description.lower()
+        
+        # Look for common skill patterns that might be missed
+        skill_patterns = [
+            # Education and experience patterns
+            (r'\b(bachelor|master|degree|diploma|certificate)\b', 'Degree'),
+            (r'\b(\d+)\s*(\+)?\s*years?\s*(of\s*)?(experience|exp)\b', 'Experience'),
+            
+            # Technology patterns
+            (r'\b(microsoft|ms)\s*(office|word|excel|powerpoint)\b', 'Microsoft Office'),
+            (r'\bdatabase\b', 'Database'),
+            (r'\bcomputer\b', 'Computer Skills'),
+            (r'\binternet\b', 'Internet'),
+            (r'\bemail\b', 'Email'),
+            
+            # Business patterns
+            (r'\b(customer|client)\s*(service|support|relations)\b', 'Customer Service'),
+            (r'\bsales\b', 'Sales'),
+            (r'\bmarketing\b', 'Marketing'),
+            (r'\baccounting\b', 'Accounting'),
+            (r'\bfinance\b', 'Finance'),
+            (r'\badministration\b', 'Administration'),
+            (r'\bmanagement\b', 'Management'),
+            (r'\bproject\s*management\b', 'Project Management'),
+            
+            # Communication patterns
+            (r'\b(communication|communicate)\b', 'Communication'),
+            (r'\b(verbal|written)\s*(communication)?\b', 'Communication'),
+            (r'\bteamwork\b', 'Teamwork'),
+            (r'\bleadership\b', 'Leadership'),
+            
+            # Technical patterns
+            (r'\btechnical\b', 'Technical Skills'),
+            (r'\btroubleshooting\b', 'Troubleshooting'),
+            (r'\bmaintenance\b', 'Maintenance'),
+            (r'\brepair\b', 'Repair'),
+            
+            # Industry-specific patterns
+            (r'\bdriving\s*(license|licence)\b', 'Driver License'),
+            (r'\bforklift\b', 'Forklift'),
+            (r'\bwarehouse\b', 'Warehouse'),
+            (r'\bmanufacturing\b', 'Manufacturing'),
+            (r'\bhealthcare\b', 'Healthcare'),
+            (r'\bretail\b', 'Retail'),
+            (r'\bconstruction\b', 'Construction'),
+        ]
+        
+        for pattern, skill in skill_patterns:
+            if re.search(pattern, desc_lower):
+                fallback_skills.append(skill)
+        
+        return list(set(fallback_skills))  # Remove duplicates
+    
+    def infer_generic_skills_from_title_and_description(self, description: str) -> list:
+        """
+        Last resort: infer basic skills based on common job requirements.
+        """
+        generic_skills = []
+        desc_lower = description.lower()
+        
+        # Always include these basic skills for most jobs
+        basic_skills = ['Communication', 'Teamwork', 'Time Management']
+        
+        # Add computer skills if any technology is mentioned
+        if any(word in desc_lower for word in ['computer', 'software', 'system', 'application', 'technology']):
+            basic_skills.append('Computer Skills')
+        
+        # Add customer service if customer-related terms found
+        if any(word in desc_lower for word in ['customer', 'client', 'service', 'support']):
+            basic_skills.append('Customer Service')
+        
+        # Add problem solving for most technical roles
+        if any(word in desc_lower for word in ['problem', 'solution', 'resolve', 'troubleshoot', 'fix']):
+            basic_skills.append('Problem Solving')
+        
+        return basic_skills
 
     def sanitize_for_model(self, data: dict) -> dict:
         safe = dict(data)
@@ -460,7 +1025,7 @@ class ProgrammedScraper:
             safe['salary_currency'] = safe['salary_currency'][:3]
         return safe
 
-    def extract_job_from_detail(self, page, job_url: str) -> dict | None:
+    def extract_job_from_detail(self, page, job_url: str) -> Optional[dict]:
         try:
             try:
                 page.goto(job_url, wait_until="domcontentloaded", timeout=40000)
@@ -487,25 +1052,55 @@ class ProgrammedScraper:
                 words = [w for w in re.split(r'[-_]', slug) if w]
                 title = ' '.join(w.capitalize() for w in words)
 
-            # Description container heuristics
+            # Description container heuristics - Extract HTML content
             description = ''
-            for sel in ['article', 'main', '.job-description', '.description', '.content', 'section[role="main"]', '[class*="description"]']:
+            description_html = ''
+            
+            # Try specific job description selectors first
+            job_desc_selectors = [
+                '.af-job-desc',  # Specific to this site
+                '[class*="job-desc"]',
+                '.job-description',
+                '.description',
+                'article',
+                'main',
+                '.content',
+                'section[role="main"]',
+                '[class*="description"]'
+            ]
+            
+            for sel in job_desc_selectors:
                 try:
                     el = page.query_selector(sel)
                     if el:
-                        txt = (el.inner_text() or '').strip()
-                        if txt and len(txt) > 150:
-                            description = self.clean_description(txt)
+                        # Extract HTML content for description
+                        html_content = (el.inner_html() or '').strip()
+                        if html_content and len(html_content) > 150:
+                            # Clean the HTML content while preserving basic formatting
+                            description = self.clean_html_description(html_content)
+                            # Also extract plain text for backup/fallback
+                            description_html = description
                             break
                 except Exception:
                     continue
+                    
             if not description:
                 try:
-                    body = page.inner_text('body')
+                    # Try to get HTML content from body as fallback
+                    body_html = page.inner_html('body')
+                    if body_html and len(body_html) > 150:
+                        description = self.clean_html_description(body_html)
+                        description_html = description
+                    else:
+                        # If no HTML available, fall back to text content
+                        body = page.inner_text('body')
+                        if body and len(body) > 150:
+                            # Convert plain text to basic HTML format
+                            description = self.convert_text_to_html(body)
+                            description_html = description
                 except Exception:
-                    body = ''
-                if body and len(body) > 150:
-                    description = self.clean_description(body)
+                    description = ''
+                    description_html = ''
 
             # Find metadata by label occurrence within the description/body
             try:
@@ -609,9 +1204,21 @@ class ProgrammedScraper:
                 logger.info(f"Skipping (insufficient content): {job_url}")
                 return None
 
+            # Use clean HTML description for database storage
+            # The description field should contain HTML markup for better formatting
+            final_description = description  # This now contains cleaned HTML
+            
+            # Generate skills and preferred skills from description
+            # Extract text from HTML for skills generation
+            description_text = re.sub(r'<[^>]+>', ' ', description)  # Strip HTML tags
+            description_text = re.sub(r'\s+', ' ', description_text).strip()  # Normalize whitespace
+            logger.info(f"Generating skills for job: {title[:50]}...")
+            skills, preferred_skills = self.generate_skills_from_description(description_text)
+            logger.info(f"Generated skills: '{skills[:100]}' | Preferred: '{preferred_skills[:100]}'")
+
             return {
                 'title': title[:200],
-                'description': description[:8000],
+                'description': final_description[:8000],
                 'location': location_obj,
                 'job_type': job_type,
                 'job_category': job_category,
@@ -626,12 +1233,14 @@ class ProgrammedScraper:
                 'work_mode': 'On-site',
                 'posted_ago': '',
                 'category_raw': category_text or '',
+                'skills': skills,
+                'preferred_skills': preferred_skills,
             }
         except Exception as e:
             logger.error(f"Error extracting detail from {job_url}: {e}")
             return None
 
-    def save_job(self, data: dict) -> JobPosting | None:
+    def save_job(self, data: dict) -> Optional[JobPosting]:
         try:
             with transaction.atomic():
                 safe = self.sanitize_for_model(data)
@@ -639,6 +1248,10 @@ class ProgrammedScraper:
                 if existing:
                     logger.info(f"Already exists, skipping: {existing.title}")
                     return existing
+                skills_to_save = safe.get('skills', '')
+                preferred_skills_to_save = safe.get('preferred_skills', '')
+                logger.info(f"Saving job with skills: '{skills_to_save}' | preferred: '{preferred_skills_to_save}'")
+                
                 job = JobPosting.objects.create(
                     title=safe['title'],
                     description=safe['description'],
@@ -661,6 +1274,8 @@ class ProgrammedScraper:
                     posted_ago=safe['posted_ago'],
                     date_posted=safe['date_posted'],
                     tags='',
+                    skills=skills_to_save,
+                    preferred_skills=preferred_skills_to_save,
                     additional_info={'scraped_from': 'programmed', 'scraper_version': '1.0'}
                 )
                 if safe.get('category_raw'):
@@ -676,7 +1291,6 @@ class ProgrammedScraper:
         
     def scrape(self) -> int:
         logger.info("Starting Programmed scraping...")
-        self.setup_database_objects()
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
@@ -684,6 +1298,18 @@ class ProgrammedScraper:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
             page = context.new_page()
+            
+            # Navigate to main page to extract logo, then setup database objects
+            try:
+                page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
+                self.human_like_delay(1.0, 1.5)
+            except Exception as e:
+                logger.warning(f"Could not load main page for logo extraction: {e}")
+            
+            # Set page reference and setup database objects (for logo extraction)
+            self.page = page
+            self.setup_database_objects()
+            
             try:
                 links = self.extract_job_links_from_search(page)
                 logger.info(f"Found {len(links)} job detail links")

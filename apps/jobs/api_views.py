@@ -18,8 +18,9 @@ from django_celery_beat.models import (
     ClockedSchedule,
 )
 from .serializers import (
-    JobPostingListSerializer, 
+    JobPostingListSerializer,
     JobPostingDetailSerializer,
+    JobPostingFullSerializer,
     JobScriptListSerializer,
     JobSchedulerListSerializer,
     CrontabScheduleSerializer,
@@ -29,52 +30,60 @@ from .serializers import (
     ClockedScheduleSerializer,
 )
 
+# Add imports for sync models and serializers
+from .models import JobSyncRun, JobSyncPortalResult, JobSyncJobResult
+from .serializers import JobSyncRunSerializer, JobSyncPortalResultSerializer, JobSyncJobResultSerializer
+
 
 class JobPostingViewSet(viewsets.ModelViewSet):
     """
     ViewSet for JobPosting model with external_source filtering.
-    
+
     Provides:
     - List all jobs with external_source filter
     - Retrieve individual job details
     - External sources listing
     """
-    
+
     queryset = JobPosting.objects.select_related('company', 'location', 'posted_by').all()
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    
+
     # Search fields
     search_fields = [
-        'title', 'description', 'company__name', 'location__name', 
+        'title', 'description', 'company__name', 'location__name',
         'location__city', 'location__state', 'tags'
     ]
-    
+
     # Ordering fields
     ordering_fields = [
-        'title', 'scraped_at', 'date_posted', 'salary_min', 'salary_max', 
+        'title', 'scraped_at', 'date_posted', 'salary_min', 'salary_max',
         'company__name', 'location__name'
     ]
     ordering = ['-scraped_at']  # Default ordering
-    
+
     def get_serializer_class(self):
-        """Return appropriate serializer based on action."""
+        """Return serializer. Use full serializer when requested."""
+        # Allow ?full=1 to force full serializer for list/detail
+        full = self.request.query_params.get('full')
+        if full in ('1', 'true', 'True'):
+            return JobPostingFullSerializer
         if self.action == 'list':
             return JobPostingListSerializer
         return JobPostingDetailSerializer
-    
+
     def get_queryset(self):
         """
         Optionally restricts the returned jobs by filtering against
         query parameters in the URL.
         """
         queryset = self.queryset
-        
+
         # Filter by active status by default, unless explicitly requested
         status_param = self.request.query_params.get('status', None)
         if status_param is None:
             queryset = queryset.filter(status='active')
-        
-        # External source filter - ONLY filter available
+
+        # External source filter
         external_source = self.request.query_params.get('external_source', None)
         if external_source:
             queryset = queryset.filter(external_source__icontains=external_source)
@@ -96,11 +105,11 @@ class JobPostingViewSet(viewsets.ModelViewSet):
             except ValueError:
                 # Ignore invalid month/year values silently to avoid breaking existing clients
                 pass
-        
-        return queryset
-    
 
-    
+        return queryset
+
+
+
     @action(detail=False, methods=['get'])
     def external_sources(self, request):
         """Get all external sources with job counts."""
@@ -108,7 +117,7 @@ class JobPostingViewSet(viewsets.ModelViewSet):
             job_count=Count('id'),
             active_jobs=Count('id', filter=Q(status='active'))
         ).order_by('-active_jobs')
-        
+
         return Response(list(sources))
 
     @action(
@@ -198,12 +207,15 @@ class JobPostingViewSet(viewsets.ModelViewSet):
                 'job_type': obj.job_type or 'full_time',
                 'experience_level': obj.experience_level or '',
                 'skills': obj.tags_list,
+                'skills_text': obj.skills,
                 'posted_date': posted_iso,
                 'application_url': obj.external_url or '',
                 'source_site': obj.external_source or 'scraper',
                 'category': obj.job_category or 'other',
                 'remote_allowed': remote_allowed,
                 'updated_at': obj.updated_at.isoformat() if obj.updated_at else None,
+                'preferred_skills': obj.preferred_skills,
+                'job_closing_date': obj.job_closing_date,
             }
 
         data = [to_feed_item(obj) for obj in items]
@@ -285,6 +297,9 @@ class JobPostingViewSet(viewsets.ModelViewSet):
                 'expired_at': obj.expired_at.isoformat() if obj.expired_at else None,
                 'tags': obj.tags or '',
                 'tags_list': obj.tags_list,
+                'job_closing_date': obj.job_closing_date or '',
+                'skills': obj.skills or '',
+                'preferred_skills': obj.preferred_skills or '',
                 'additional_info': obj.additional_info or {},
                 'scraped_at': obj.scraped_at.isoformat() if obj.scraped_at else None,
                 'updated_at': obj.updated_at.isoformat() if obj.updated_at else None,
@@ -379,3 +394,28 @@ class PeriodicTaskViewSet(ReadOnlyListViewSet):
     search_fields = ['name', 'task', 'description', 'queue']
     ordering_fields = ['last_run_at', 'total_run_count', 'date_changed', 'enabled']
     ordering = ['-date_changed']
+
+
+# New read-only viewsets for sync models
+class JobSyncRunViewSet(ReadOnlyListViewSet):
+    queryset = JobSyncRun.objects.all()
+    serializer_class = JobSyncRunSerializer
+    search_fields = ['status', 'error_message']
+    ordering_fields = ['started_at', 'finished_at', 'jobs_fetched', 'total_synced']
+    ordering = ['-started_at']
+
+
+class JobSyncPortalResultViewSet(ReadOnlyListViewSet):
+    queryset = JobSyncPortalResult.objects.select_related('run').all()
+    serializer_class = JobSyncPortalResultSerializer
+    search_fields = ['portal_name', 'target_url', 'run__id']
+    ordering_fields = ['success_count', 'failure_count', 'success_rate', 'batch_size']
+    ordering = ['portal_name']
+
+
+class JobSyncJobResultViewSet(ReadOnlyListViewSet):
+    queryset = JobSyncJobResult.objects.select_related('run', 'portal_result').all()
+    serializer_class = JobSyncJobResultSerializer
+    search_fields = ['job_id', 'request_url', 'error']
+    ordering_fields = ['created_at', 'response_status', 'was_success']
+    ordering = ['-created_at']

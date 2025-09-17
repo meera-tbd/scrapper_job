@@ -129,6 +129,239 @@ class NSWGovernmentJobScraper:
             timezone_id='Australia/Sydney'
         )
         return context
+
+    def _strip_html_tags(self, html: str) -> str:
+        """Very small HTML to text converter without external deps.
+
+        Preserves list item breaks and paragraph spacing so that skill
+        extraction downstream has structure to work with.
+        """
+        if not html:
+            return ""
+        try:
+            # Replace list tags with newlines so bullets remain separated
+            text = re.sub(r"<\s*li[^>]*>", "\n- ", html, flags=re.IGNORECASE)
+            text = re.sub(r"<\s*/\s*li\s*>", "\n", text, flags=re.IGNORECASE)
+            text = re.sub(r"<\s*p[^>]*>", "\n\n", text, flags=re.IGNORECASE)
+            text = re.sub(r"<\s*/\s*p\s*>", "\n\n", text, flags=re.IGNORECASE)
+            text = re.sub(r"<\s*br\s*/?>", "\n", text, flags=re.IGNORECASE)
+            # Remove the rest of tags
+            text = re.sub(r"<[^>]+>", " ", text)
+            # Collapse whitespace
+            text = re.sub(r"\s+", " ", text)
+            # Restore paragraph/newline structure markers a bit
+            text = text.replace(" - ", " - ")
+            return text.strip()
+        except Exception:
+            return re.sub(r"<[^>]+>", " ", html)
+
+    def _remove_image_tags(self, html: str) -> str:
+        """Remove <img>, <picture>, <figure> blocks from HTML safely."""
+        if not html:
+            return html
+        try:
+            # Remove <picture>...</picture> and <figure>...</figure> blocks
+            html = re.sub(r"<\s*picture[^>]*>[\s\S]*?<\s*/\s*picture\s*>", "", html, flags=re.IGNORECASE)
+            html = re.sub(r"<\s*figure[^>]*>[\s\S]*?<\s*/\s*figure\s*>", "", html, flags=re.IGNORECASE)
+            # Remove standalone <img ...>
+            html = re.sub(r"<\s*img[^>]*>", "", html, flags=re.IGNORECASE)
+            return html
+        except Exception:
+            return html
+
+    def _extract_bullets(self, description_text: str, description_html: str = ""):
+        """Extract bullet-like lines from text or HTML. Returns list[str]."""
+        lines = []
+        try:
+            source = description_text or ""
+            if description_html and len(description_html) > len(description_text or ""):
+                # Try to get more structure from HTML
+                html_text = self._strip_html_tags(description_html)
+                # Prefer the longer, richer text
+                if len(html_text) > len(source):
+                    source = html_text
+            # Split by common bullet markers and newlines
+            potential = re.split(r"\n+|•|\u2022|\u25CF|\-|\u2013|\u2014", source)
+            for p in potential:
+                cleaned = p.strip(" \t:-•\u2022\u25CF\u2013\u2014")
+                if 3 < len(cleaned) < 160 and any(token in cleaned.lower() for token in [
+                    "experience", "ability", "skills", "knowledge", "qualif", "demonstrated",
+                    "cert", "degree", "communication", "stakeholder", "policy", "analysis",
+                    "project", "manage", "lead", "law", "legal", "system", "data"
+                ]):
+                    lines.append(cleaned)
+        except Exception:
+            pass
+        # De-duplicate while keeping order
+        seen = set()
+        unique = []
+        for item in lines:
+            key = item.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+        return unique[:100]
+
+    def _extract_sentences(self, text: str) -> list:
+        """Extract requirement-like short sentences from free text.
+
+        Looks for patterns like 'experience in', 'knowledge of', 'ability to', etc.
+        """
+        if not text:
+            return []
+        text_norm = re.sub(r"\s+", " ", text)
+        # Split into sentences with basic rule
+        sentences = re.split(r"(?<=[\.!?])\s+", text_norm)
+        out = []
+        patterns = [
+            r"experience (?:in|with|of) [^\.;]{3,100}",
+            r"knowledge (?:of|in) [^\.;]{3,100}",
+            r"ability to [^\.;]{3,100}",
+            r"proven [^\.;]{3,100}",
+            r"demonstrated [^\.;]{3,100}",
+            r"qualification(?:s)? (?:in|of) [^\.;]{3,100}",
+            r"degree (?:in|of) [^\.;]{3,100}",
+        ]
+        for s in sentences:
+            s_low = s.lower()
+            if any(k in s_low for k in ["experience", "knowledge", "ability", "qualification", "degree", "demonstrated", "proven"]):
+                # Trim to a clean phrase
+                m = None
+                for pat in patterns:
+                    m = re.search(pat, s_low, re.IGNORECASE)
+                    if m:
+                        out.append(s[m.start():m.end()].strip().rstrip(',;:'))
+                        break
+                if not m and 8 < len(s) < 180:
+                    out.append(s.strip())
+        # Deduplicate
+        seen = set()
+        res = []
+        for it in out:
+            key = it.lower()
+            if key not in seen:
+                seen.add(key)
+                res.append(it)
+        return res[:80]
+
+    def _match_keyword_skills(self, text: str) -> list:
+        """Keyword-based skills fallback. Returns ranked unique matches."""
+        if not text:
+            return []
+        keywords = [
+            # Generic/soft
+            'communication', 'stakeholder engagement', 'teamwork', 'leadership', 'problem solving',
+            'time management', 'attention to detail', 'analytical', 'presentation', 'negotiation',
+            'report writing', 'risk management', 'project management', 'change management',
+            # Legal/policy
+            'legal research', 'legislation', 'policy development', 'contract drafting', 'compliance',
+            'litigation', 'advice', 'privacy', 'governance', 'procurement', 'regulatory', 'risk',
+            # Technology/data
+            'excel', 'power bi', 'sql', 'python', 'data analysis', 'sharepoint', 'gis', 'sap',
+            # Emergency/ops
+            'incident management', 'work health and safety', 'whs', 'emergency response'
+        ]
+        text_low = text.lower()
+        hits = []
+        for kw in keywords:
+            if kw in text_low:
+                hits.append(kw.title())
+        # Prefer longer phrases first
+        hits = sorted(set(hits), key=lambda x: (-len(x), x))
+        return hits[:30]
+
+    def _split_essential_vs_preferred(self, lines: list, description_text: str) -> tuple:
+        """Heuristic separation of essential vs preferred requirements.
+
+        - Looks for headings like 'Essential', 'Desirable/Preferred'.
+        - If not found, splits first 8-12 as essential and the rest preferred.
+        """
+        desc_lower = (description_text or "").lower()
+        essential = []
+        preferred = []
+        # Headings windows
+        if any(h in desc_lower for h in ["desirable", "preferred", "nice to have"]):
+            # Try to split around these keywords
+            preferred_idx = None
+            for i, line in enumerate(lines):
+                l = line.lower()
+                if any(k in l for k in ["desirable", "preferred", "nice to have"]):
+                    preferred_idx = i
+                    break
+            if preferred_idx is not None:
+                essential = [l for l in lines[:preferred_idx] if len(l) > 3]
+                preferred = [l for l in lines[preferred_idx:] if len(l) > 3]
+        if not essential and not preferred:
+            cut = 10 if len(lines) > 14 else max(6, len(lines) // 2)
+            essential = lines[:cut]
+            preferred = lines[cut:]
+        # Fallbacks to ensure non-empty
+        if not essential and lines:
+            essential = lines[: min(10, len(lines))]
+        if not preferred and len(lines) > len(essential):
+            preferred = [l for l in lines if l not in essential][:10]
+        return essential[:50], preferred[:50]
+
+    def generate_skills_from_description(self, description_text: str, description_html: str = ""):
+        """Generate skills and preferred skills from description content.
+
+        Returns dict with keys: skills, preferred_skills, skills_list, preferred_skills_list
+        where 'skills' and 'preferred_skills' are comma-separated strings trimmed to
+        fit model constraints, while full lists are preserved for additional_info.
+        """
+        lines = self._extract_bullets(description_text, description_html)
+        # Add sentence-based extraction to catch non-bullet descriptions
+        if not lines:
+            lines = self._extract_sentences(description_text)
+        essential, preferred = self._split_essential_vs_preferred(lines, description_text)
+
+        # Keyword fallback to guarantee non-empty
+        if not essential:
+            essential = self._match_keyword_skills(description_text)
+        if not preferred:
+            # Prefer secondary keywords not already in essential
+            kw = self._match_keyword_skills(description_text)
+            preferred = [k for k in kw if k not in set(map(str.lower, essential))]
+        # As an absolute fallback, mirror essential so both fields are populated
+        if not preferred and essential:
+            preferred = [e for e in essential[-5:]]
+
+        # Normalize phrases
+        def normalize(items):
+            normalized = []
+            for it in items:
+                it = re.sub(r"\s+", " ", it).strip(" -:\u2013\u2014")
+                # Capitalize first letter for readability
+                if it and it[0].islower():
+                    it = it[0].upper() + it[1:]
+                normalized.append(it)
+            return normalized
+
+        essential = normalize(essential)
+        preferred = normalize(preferred)
+
+        # Build comma-separated strings within model limits (200 chars)
+        def join_with_limit(items, max_len=200):
+            out = []
+            total = 0
+            for it in items:
+                add = (", "+it) if out else it
+                if total + len(add) <= max_len:
+                    out.append(it)
+                    total += len(add)
+                else:
+                    break
+            return ", ".join(out)
+
+        skills_str = join_with_limit(essential)
+        preferred_str = join_with_limit(preferred)
+
+        return {
+            "skills": skills_str,
+            "preferred_skills": preferred_str,
+            "skills_list": essential,
+            "preferred_skills_list": preferred,
+        }
     
     def extract_salary_info(self, salary_text):
         """Extract salary information from text."""
@@ -744,6 +977,8 @@ class NSWGovernmentJobScraper:
                                 job_details['work_type'] = value
                             elif 'closing date' in label:
                                 job_details['closing_date'] = value
+                                # Keep original formatting; also attempt to trim repeated words
+                                job_details['closing_date'] = ' '.join(job_details['closing_date'].split())
                                 
                     except Exception as e:
                         self.logger.debug(f"Error processing table row: {e}")
@@ -782,7 +1017,7 @@ class NSWGovernmentJobScraper:
                 description_found = False
                 
                 if desc_element:
-                    desc_html = desc_element.inner_html()
+                    desc_html = self._remove_image_tags(desc_element.inner_html())
                     desc_text = desc_element.text_content().strip()
                     
                     # Check if the description contains navigation/header content (invalid)
@@ -831,7 +1066,7 @@ class NSWGovernmentJobScraper:
                             desc_element = page.query_selector(selector)
                             if desc_element:
                                 desc_text = desc_element.text_content().strip()
-                                desc_html = desc_element.inner_html()
+                                desc_html = self._remove_image_tags(desc_element.inner_html())
                                 
                                 # Check validity
                                 is_valid_description = True
@@ -897,6 +1132,7 @@ class NSWGovernmentJobScraper:
                         
                         for p in paragraphs:
                             p_text = p.text_content().strip()
+                            p_html = p.inner_html()
                             
                             # Skip navigation/header paragraphs
                             is_valid = True
@@ -905,9 +1141,17 @@ class NSWGovernmentJobScraper:
                                     is_valid = False
                                     break
                             
-                            if is_valid and len(p_text) > 20:
+                            # Skip paragraphs that contain image-like tags
+                            has_image = False
+                            try:
+                                if '<img' in p_html.lower() or '<picture' in p_html.lower() or '<figure' in p_html.lower():
+                                    has_image = True
+                            except Exception:
+                                pass
+
+                            if is_valid and not has_image and len(p_text) > 20:
                                 combined_text += p_text + "\n\n"
-                                combined_html += p.inner_html() + "\n"
+                                combined_html += self._remove_image_tags(p_html) + "\n"
                         
                         if len(combined_text.strip()) > 200:
                             job_details['description'] = combined_text.strip()
@@ -915,9 +1159,21 @@ class NSWGovernmentJobScraper:
                             self.logger.info(f"Found description from paragraphs: {len(combined_text)} characters")
                     except Exception as e:
                         self.logger.debug(f"Paragraph extraction failed: {e}")
-                        
+            
             except Exception as e:
                 self.logger.warning(f"Error extracting description: {e}")
+            
+            # If closing date not captured yet, try text-based search on page
+            try:
+                if not job_details.get('closing_date'):
+                    full_text = page.locator('body').text_content()
+                    m = re.search(r"Closing date\s*:\s*([\d/]{8,10})(?:\s*[-–]\s*)?(\d{1,2}:\d{2}\s*[AP]M)?", full_text, re.IGNORECASE)
+                    if m:
+                        date_part = m.group(1)
+                        time_part = m.group(2) or ""
+                        job_details['closing_date'] = f"{date_part} {time_part}".strip()
+            except Exception:
+                pass
             
             # Extract requirements and qualifications
             try:
@@ -1171,6 +1427,15 @@ class NSWGovernmentJobScraper:
                 job_data.get('description', ''),
                 job_data.get('company', '')
             )
+
+            # Prefer HTML description if available
+            description_to_store = job_data.get('description_html') or job_data.get('description', job_data['title'])
+
+            # Generate skills from description
+            skills_payload = self.generate_skills_from_description(
+                job_data.get('description', ''),
+                job_data.get('description_html', '')
+            )
             
             # Map work type
             work_type_mapping = {
@@ -1194,7 +1459,7 @@ class NSWGovernmentJobScraper:
                 from django.db import transaction
                 job_posting = JobPosting.objects.create(
                     title=job_data['title'],
-                    description=job_data.get('description', job_data['title']),
+                    description=description_to_store,
                     company=company,
                     posted_by=bot_user,
                     location=location,
@@ -1212,11 +1477,17 @@ class NSWGovernmentJobScraper:
                     posted_ago=job_data.get('posted_ago', ''),
                     date_posted=date_posted,
                     tags=job_data.get('tags', ''),
+                    job_closing_date=job_data.get('closing_date', ''),
+                    skills=skills_payload.get('skills', ''),
+                    preferred_skills=skills_payload.get('preferred_skills', ''),
                     additional_info={
                         'category': job_data.get('category', ''),
                         'requirements': job_data.get('requirements', ''),
                         'closing_date': job_data.get('closing_date', ''),
                         'description_html': job_data.get('description_html', ''),
+                        'description_text': job_data.get('description', ''),
+                        'skills_list': skills_payload.get('skills_list', []),
+                        'preferred_skills_list': skills_payload.get('preferred_skills_list', []),
                         'scraper_version': '1.0'
                     }
                 )

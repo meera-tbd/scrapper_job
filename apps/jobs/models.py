@@ -9,13 +9,14 @@ from apps.companies.models import Company
 from apps.core.models import Location
 from django_celery_beat.models import PeriodicTask, CrontabSchedule
 from django.utils import timezone
+from django.core.validators import MinValueValidator
 
 User = get_user_model()
 
 
 class JobPosting(models.Model):
     """Main model for storing job postings."""
-    
+
     JOB_TYPE_CHOICES = [
         ('full_time', 'Full Time'),
         ('part_time', 'Part Time'),
@@ -26,14 +27,14 @@ class JobPosting(models.Model):
         ('internship', 'Internship'),
         ('freelance', 'Freelance'),
     ]
-    
+
     STATUS_CHOICES = [
         ('active', 'Active'),
         ('inactive', 'Inactive'),
         ('expired', 'Expired'),
         ('filled', 'Filled'),
     ]
-    
+
     SALARY_TYPE_CHOICES = [
         ('hourly', 'Hourly'),
         ('daily', 'Daily'),
@@ -41,14 +42,14 @@ class JobPosting(models.Model):
         ('monthly', 'Monthly'),
         ('yearly', 'Yearly'),
     ]
-    
+
     CURRENCY_CHOICES = [
         ('AUD', 'Australian Dollar'),
         ('USD', 'US Dollar'),
         ('EUR', 'Euro'),
         ('GBP', 'British Pound'),
     ]
-    
+
     JOB_CATEGORY_CHOICES = [
         # Core/general
         ('technology', 'Technology'),
@@ -78,49 +79,52 @@ class JobPosting(models.Model):
 
     # Allow runtime extension of choices for new categories encountered during scraping
     # Admin/forms will render newly appended choices without migrations
-    
+
     # Basic Information
     title = models.CharField(max_length=200)
     slug = models.SlugField(max_length=250, unique=True)
     description = models.TextField()
-    
+
     # Relationships
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='job_postings')
     posted_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posted_jobs')
     location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='jobs')
-    
+
     # Job Details
     job_category = models.CharField(max_length=50, choices=JOB_CATEGORY_CHOICES, default='other')
     job_type = models.CharField(max_length=20, choices=JOB_TYPE_CHOICES, default='full_time')
     experience_level = models.CharField(max_length=100, blank=True)
     work_mode = models.CharField(max_length=50, blank=True, help_text="Remote, Hybrid, On-site, etc.")
-    
+
     # Salary Information
     salary_min = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     salary_max = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     salary_currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='AUD')
     salary_type = models.CharField(max_length=10, choices=SALARY_TYPE_CHOICES, default='yearly')
     salary_raw_text = models.CharField(max_length=200, blank=True, help_text="Original salary text")
-    
+
     # External Source Information
     external_source = models.CharField(max_length=100, default='seek.com.au')
     external_url = models.URLField(unique=True, help_text="Original job posting URL")
     external_id = models.CharField(max_length=100, blank=True, help_text="External system job ID")
-    
+
     # Metadata
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     posted_ago = models.CharField(max_length=50, blank=True, help_text="Relative date like '2 days ago'")
     date_posted = models.DateTimeField(null=True, blank=True)
     expired_at = models.DateTimeField(null=True, blank=True, help_text="When the job was marked expired")
     tags = models.TextField(blank=True, help_text="Comma-separated tags or skills")
-    
+
     # Timestamps
     scraped_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     # Additional Data
     additional_info = models.JSONField(default=dict, blank=True, help_text="Store any additional scraped data")
-    
+    job_closing_date = models.CharField(null=True, blank=True)
+    skills = models.CharField(null=True, blank=True, max_length=200)
+    preferred_skills = models.CharField(null=True, blank=True, max_length=200)
+
     class Meta:
         ordering = ['-scraped_at']
         verbose_name = 'Job Posting'
@@ -130,10 +134,10 @@ class JobPosting(models.Model):
             models.Index(fields=['job_category', 'location']),
             models.Index(fields=['company', 'status']),
         ]
-    
+
     def __str__(self):
         return f"{self.title} at {self.company.name}"
-    
+
     def save(self, *args, **kwargs):
         if not self.slug:
             base_slug = slugify(self.title)
@@ -144,12 +148,12 @@ class JobPosting(models.Model):
                 counter += 1
             self.slug = unique_slug
         super().save(*args, **kwargs)
-    
+
     @property
     def tags_list(self):
         """Return tags as a list."""
         return [tag.strip() for tag in self.tags.split(',') if tag.strip()] if self.tags else []
-    
+
     @property
     def salary_display(self):
         """Return formatted salary string."""
@@ -261,3 +265,58 @@ class JobScheduler(models.Model):
             'month_of_year': month_of_year,
             'timezone': timezone.get_current_timezone_name(),
         }
+
+
+class JobSyncRun(models.Model):
+    """A single execution of job data synchronization."""
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    incremental = models.BooleanField(default=True)
+    jobs_fetched = models.PositiveIntegerField(default=0)
+    total_synced = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, default='running')  # running, success, error
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-started_at']
+
+    def __str__(self):
+        return f"SyncRun {self.started_at:%Y-%m-%d %H:%M:%S} ({self.status})"
+
+
+class JobSyncPortalResult(models.Model):
+    """Aggregated result for a portal within a sync run."""
+    run = models.ForeignKey(JobSyncRun, on_delete=models.CASCADE, related_name='portal_results')
+    portal_name = models.CharField(max_length=120)
+    target_url = models.URLField(blank=True)
+    batch_size = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failure_count = models.PositiveIntegerField(default=0)
+    success_rate = models.FloatField(default=0.0, validators=[MinValueValidator(0.0)])
+
+    class Meta:
+        ordering = ['portal_name']
+
+    def __str__(self):
+        return f"{self.portal_name}: {self.success_count}/{self.success_count + self.failure_count}"
+
+
+class JobSyncJobResult(models.Model):
+    """Per-job push result for traceability and debugging."""
+    run = models.ForeignKey(JobSyncRun, on_delete=models.CASCADE, related_name='job_results')
+    portal_result = models.ForeignKey(JobSyncPortalResult, on_delete=models.CASCADE, related_name='job_results')
+    job_id = models.CharField(max_length=120)
+    request_url = models.URLField(blank=True)
+    request_headers = models.JSONField(default=dict, blank=True)
+    request_payload = models.JSONField(default=dict, blank=True)
+    response_status = models.IntegerField(null=True, blank=True)
+    response_body = models.TextField(blank=True)
+    was_success = models.BooleanField(default=False)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Job {self.job_id} -> {self.portal_result.portal_name} ({'OK' if self.was_success else 'FAIL'})"

@@ -26,6 +26,7 @@ from urllib.parse import urljoin, urlparse
 from base64 import b64decode
 import json
 import html as html_lib
+from typing import Optional, List, Union
 
 # Django setup (mirror voyages script conventions)
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -82,8 +83,61 @@ class ChandlerMacleodScraper:
     def human_like_delay(self, min_s=0.8, max_s=2.0):
         time.sleep(random.uniform(min_s, max_s))
 
+    def extract_company_logo(self, page) -> str:
+        """Extract company logo URL from the website."""
+        try:
+            # Navigate to home page to get logo
+            page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
+            self.human_like_delay(1, 2)
+            
+            # Common logo selectors
+            logo_selectors = [
+                'img[alt*="Chandler Macleod" i]',
+                'img[alt*="logo" i]',
+                '.logo img',
+                '.header-logo img',
+                '.navbar-brand img',
+                '.site-logo img',
+                '[class*="logo"] img',
+                'header img',
+                '.header img:first-child'
+            ]
+            
+            for selector in logo_selectors:
+                try:
+                    logo_element = page.query_selector(selector)
+                    if logo_element:
+                        logo_src = logo_element.get_attribute('src')
+                        if logo_src:
+                            # Convert relative URL to absolute
+                            if logo_src.startswith('//'):
+                                logo_url = f"https:{logo_src}"
+                            elif logo_src.startswith('/'):
+                                logo_url = f"{self.base_url}{logo_src}"
+                            elif logo_src.startswith('http'):
+                                logo_url = logo_src
+                            else:
+                                logo_url = f"{self.base_url}/{logo_src}"
+                            
+                            # Validate it's an image URL
+                            if any(ext in logo_url.lower() for ext in ['.png', '.jpg', '.jpeg', '.svg', '.gif', '.webp']):
+                                logger.info(f"Found company logo: {logo_url}")
+                                return logo_url
+                except Exception as e:
+                    logger.debug(f"Error checking selector {selector}: {e}")
+                    continue
+            
+            logger.warning("Could not find company logo on website")
+            return ''
+        except Exception as e:
+            logger.error(f"Error extracting company logo: {e}")
+            return ''
+
     def setup_database_objects(self):
-        self.company, _ = Company.objects.get_or_create(
+        # First check if company already exists and has logo
+        existing_company = Company.objects.filter(name="Chandler Macleod").first()
+        
+        self.company, created = Company.objects.get_or_create(
             name="Chandler Macleod",
             defaults={
                 'description': "Chandler Macleod is a leading recruitment agency in Australia and New Zealand.",
@@ -92,6 +146,23 @@ class ChandlerMacleodScraper:
                 'logo': ''
             }
         )
+        
+        # If company exists but doesn't have logo, or if new company was created, extract logo
+        if created or not self.company.logo:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=self.headless)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                try:
+                    logo_url = self.extract_company_logo(page)
+                    if logo_url:
+                        self.company.logo = logo_url
+                        self.company.save(update_fields=['logo'])
+                        logger.info(f"Updated company logo: {logo_url}")
+                finally:
+                    browser.close()
         self.scraper_user, _ = User.objects.get_or_create(
             username='chandler_scraper',
             defaults={
@@ -102,7 +173,7 @@ class ChandlerMacleodScraper:
             }
         )
 
-    def get_or_create_location(self, location_text: str | None) -> Location | None:
+    def get_or_create_location(self, location_text: Optional[str]) -> Optional[Location]:
         if not location_text:
             return None
         text = location_text.strip()
@@ -138,7 +209,7 @@ class ChandlerMacleodScraper:
         )
         return location
 
-    def normalize_job_type(self, text: str | None) -> str:
+    def normalize_job_type(self, text: Optional[str]) -> str:
         if not text:
             return 'full_time'
         t = text.lower()
@@ -157,7 +228,7 @@ class ChandlerMacleodScraper:
         # Treat permanent/full time as full_time
         return 'full_time'
 
-    def parse_salary(self, raw: str | None) -> dict:
+    def parse_salary(self, raw: Optional[str]) -> dict:
         result = {
             'salary_min': None,
             'salary_max': None,
@@ -197,7 +268,7 @@ class ChandlerMacleodScraper:
                 result['salary_max'] = non_zero[0]
         return result
 
-    def parse_posted_date(self, text: str | None):
+    def parse_posted_date(self, text: Optional[str]):
         if not text:
             return None
         t = text.strip()
@@ -281,6 +352,179 @@ class ChandlerMacleodScraper:
             cleaned = cleaned[:cut].rstrip()
         return cleaned
 
+    def clean_html_description(self, html: str) -> str:
+        """Clean HTML description while preserving structure for proper HTML format."""
+        if not html:
+            return ''
+        
+        # Remove UI noise but keep HTML structure
+        ui_markers_exact = {
+            'Apply now',
+            'Share this job',
+            'Interested in this job?',
+            'Save Job',
+            'Create as alert',
+            'Similar Jobs',
+            'Back to job search',
+        }
+        
+        # Remove script and style tags
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Convert to text temporarily to clean UI markers, then convert back to HTML-like structure
+        text = self.html_to_text(html)
+        cleaned_text = self.clean_description(text)
+        
+        # Convert back to simple HTML structure
+        html_lines = []
+        lines = cleaned_text.split('\n')
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                html_lines.append('<br>')
+                continue
+                
+            # Check if it's a list item
+            if line.startswith('- '):
+                if not in_list:
+                    html_lines.append('<ul>')
+                    in_list = True
+                html_lines.append(f'<li>{line[2:]}</li>')
+            else:
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                html_lines.append(f'<p>{line}</p>')
+        
+        if in_list:
+            html_lines.append('</ul>')
+            
+        # Join and clean up
+        result = '\n'.join(html_lines)
+        result = re.sub(r'<br>\s*<br>', '<br>', result)
+        result = re.sub(r'<p></p>', '', result)
+        
+        return result.strip()
+
+    def generate_skills_from_description(self, description: str) -> tuple[str, str]:
+        """Extract skills and preferred skills from job description."""
+        if not description:
+            return '', ''
+        
+        # Convert HTML to text for analysis
+        text = self.html_to_text(description).lower()
+        
+        # Common skill keywords and technologies
+        technical_skills = [
+            # Programming languages
+            'python', 'java', 'javascript', 'typescript', 'c#', 'c++', 'ruby', 'php', 'go', 'kotlin', 'swift',
+            'scala', 'rust', 'dart', 'r', 'matlab', 'sql', 'html', 'css', 'sass', 'less',
+            
+            # Frameworks and libraries
+            'react', 'angular', 'vue', 'nodejs', 'express', 'django', 'flask', 'spring', 'laravel',
+            'rails', 'asp.net', '.net', 'bootstrap', 'jquery', 'webpack', 'babel',
+            
+            # Databases
+            'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch', 'oracle', 'sqlite', 'cassandra',
+            
+            # Cloud and DevOps
+            'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'gitlab', 'github', 'terraform',
+            'ansible', 'chef', 'puppet', 'nginx', 'apache',
+            
+            # Data and Analytics
+            'tableau', 'power bi', 'excel', 'powerpoint', 'word', 'outlook', 'sharepoint', 'salesforce',
+            'hubspot', 'google analytics', 'seo', 'sem', 'adwords',
+            
+            # Other technical
+            'api', 'rest', 'graphql', 'microservices', 'agile', 'scrum', 'kanban', 'jira', 'confluence',
+            'git', 'svn', 'linux', 'windows', 'macos', 'unix'
+        ]
+        
+        soft_skills = [
+            'communication', 'leadership', 'teamwork', 'problem solving', 'analytical thinking',
+            'project management', 'time management', 'customer service', 'negotiation', 'presentation',
+            'training', 'mentoring', 'strategic planning', 'business analysis', 'stakeholder management',
+            'change management', 'risk management', 'budget management', 'vendor management',
+            'cross-functional collaboration', 'attention to detail', 'multitasking', 'adaptability',
+            'innovation', 'creativity', 'critical thinking', 'decision making'
+        ]
+        
+        industry_skills = [
+            'healthcare', 'finance', 'banking', 'insurance', 'retail', 'manufacturing', 'construction',
+            'mining', 'logistics', 'transportation', 'hospitality', 'education', 'government',
+            'legal', 'marketing', 'sales', 'hr', 'recruitment', 'accounting', 'audit', 'compliance',
+            'safety', 'quality assurance', 'procurement', 'supply chain', 'operations'
+        ]
+        
+        all_skills = technical_skills + soft_skills + industry_skills
+        
+        # Find skills mentioned in the description
+        found_skills = []
+        for skill in all_skills:
+            if skill in text:
+                found_skills.append(skill.title())
+        
+        # Remove duplicates and sort
+        found_skills = sorted(list(set(found_skills)))
+        
+        # Split into required and preferred based on context
+        required_skills = []
+        preferred_skills = []
+        
+        # Look for sections that indicate required vs preferred
+        required_sections = [
+            'required', 'must have', 'essential', 'mandatory', 'key requirements',
+            'minimum requirements', 'qualifications', 'you will need'
+        ]
+        
+        preferred_sections = [
+            'preferred', 'nice to have', 'desirable', 'advantageous', 'bonus',
+            'ideal candidate', 'would be great', 'plus'
+        ]
+        
+        # Simple heuristic: if we can identify sections, categorize accordingly
+        # Otherwise, put first 60% in required, rest in preferred
+        text_lines = text.split('\n')
+        current_section = 'required'  # default
+        
+        for line in text_lines:
+            line_lower = line.lower().strip()
+            
+            # Check if this line indicates a section change
+            if any(phrase in line_lower for phrase in preferred_sections):
+                current_section = 'preferred'
+            elif any(phrase in line_lower for phrase in required_sections):
+                current_section = 'required'
+            
+            # Find skills in this line
+            for skill in found_skills:
+                if skill.lower() in line_lower:
+                    if current_section == 'required' and skill not in required_skills:
+                        required_skills.append(skill)
+                    elif current_section == 'preferred' and skill not in preferred_skills:
+                        preferred_skills.append(skill)
+        
+        # If we couldn't categorize any skills using sections, use a simple split
+        if not required_skills and not preferred_skills:
+            split_point = max(1, len(found_skills) * 2 // 3)  # 2/3 required, 1/3 preferred
+            required_skills = found_skills[:split_point]
+            preferred_skills = found_skills[split_point:]
+        
+        # Ensure skills don't appear in both lists
+        preferred_skills = [s for s in preferred_skills if s not in required_skills]
+        
+        # Join with commas and limit length
+        required_str = ', '.join(required_skills[:10])  # Limit to 10 skills
+        preferred_str = ', '.join(preferred_skills[:8])   # Limit to 8 skills
+        
+        return required_str, preferred_str
+
     def html_to_text(self, html: str) -> str:
         if not html:
             return ''
@@ -320,7 +564,7 @@ class ChandlerMacleodScraper:
         if not base64_json:
             return ''
 
-        # Decode and clean the HTML description from the embedded JSON
+        # Decode and return the HTML description from the embedded JSON
         try:
             raw = b64decode(base64_json).decode('utf-8', errors='ignore')
             data = json.loads(raw)
@@ -330,12 +574,12 @@ class ChandlerMacleodScraper:
                 or data.get('pSEOMetaDescription')
                 or ''
             )
-            text = self.html_to_text(html_desc)
-            return self.clean_description(text)
+            # Clean HTML but preserve structure
+            return self.clean_html_description(html_desc)
         except Exception:
             return ''
 
-    def normalize_category_choice(self, raw_text: str | None) -> str:
+    def normalize_category_choice(self, raw_text: Optional[str]) -> str:
         """Map raw category text from site to our JOB_CATEGORY_CHOICES."""
         if not raw_text:
             return 'other'
@@ -389,7 +633,7 @@ class ChandlerMacleodScraper:
                 return val
         return 'other'
 
-    def map_category_strict(self, raw_text: str | None) -> str:
+    def map_category_strict(self, raw_text: Optional[str]) -> str:
         """Strict category mapper. Only returns a known key if there is a clear, direct match.
 
         If no exact mapping is found, returns 'other' to avoid wrong categorization.
@@ -521,7 +765,7 @@ class ChandlerMacleodScraper:
             logger.warning(f"Search page extraction warning: {e}")
         return list(links)
 
-    def collect_job_links_all_pages(self, page, target_count: int | None) -> list[str]:
+    def collect_job_links_all_pages(self, page, target_count: Optional[int]) -> List[str]:
         """Collect links across numeric pagination by clicking pager buttons.
 
         This does not rely on hrefs on the pager; it clicks visible elements whose text is a page number.
@@ -644,7 +888,7 @@ class ChandlerMacleodScraper:
             return re.sub(r'\s+', ' ', val)
         return ''
 
-    def extract_job_from_detail(self, page, job_url: str) -> dict | None:
+    def extract_job_from_detail(self, page, job_url: str) -> Optional[dict]:
         try:
             # Many sites keep background connections open; avoid networkidle here
             try:
@@ -683,38 +927,68 @@ class ChandlerMacleodScraper:
             except Exception:
                 body_text = ''
 
-            # Description: try dynamic JSON first, then DOM containers
+            # Description: try dynamic JSON first, then DOM containers - preserve HTML format
             description = ''
             dyn_desc = self.extract_description_from_dynamic_json(page)
             if dyn_desc and len(dyn_desc) > 100:
                 description = dyn_desc
-            for sel in ['.job-description', '.description', '.job-details', '.content', 'main', 'article', '[class*="description"]']:
-                try:
-                    el = page.query_selector(sel)
-                    if el:
-                        txt = (el.inner_text() or '').strip()
-                        if txt and len(txt) > 150:
-                            description = self.clean_description(txt)
+            else:
+                # Try to get HTML content from DOM containers
+                for sel in ['.job-description', '.description', '.job-details', '.content', 'main', 'article', '[class*="description"]']:
+                    try:
+                        el = page.query_selector(sel)
+                        if el:
+                            # Get innerHTML to preserve HTML structure
+                            html_content = el.inner_html()
+                            if html_content and len(html_content) > 150:
+                                description = self.clean_html_description(html_content)
+                                break
+                            else:
+                                # Fallback to inner_text and convert to simple HTML
+                                txt = (el.inner_text() or '').strip()
+                                if txt and len(txt) > 150:
+                                    cleaned_text = self.clean_description(txt)
+                                    # Convert to simple HTML
+                                    html_lines = []
+                                    for line in cleaned_text.split('\n'):
+                                        line = line.strip()
+                                        if line:
+                                            if line.startswith('- '):
+                                                html_lines.append(f'<li>{line[2:]}</li>')
+                                            else:
+                                                html_lines.append(f'<p>{line}</p>')
+                                    description = '\n'.join(html_lines)
+                                    break
+                    except Exception:
+                        continue
+                        
+                if not description and body_text:
+                    # Heuristic: slice between responsibilities/what and similar/footer
+                    start_idx = 0
+                    for s in ['Key Responsibilities', 'What We', 'About The Role', 'The Role', 'Position Summary']:
+                        i = body_text.lower().find(s.lower())
+                        if i != -1:
+                            start_idx = i
                             break
-                except Exception:
-                    continue
-            if not description and body_text:
-                # Heuristic: slice between responsibilities/what and similar/footer
-                start_idx = 0
-                for s in ['Key Responsibilities', 'What We', 'About The Role', 'The Role', 'Position Summary']:
-                    i = body_text.lower().find(s.lower())
-                    if i != -1:
-                        start_idx = i
-                        break
-                end_idx = len(body_text)
-                for e in ['Similar Jobs', 'Apply now', 'Create as alert', 'Privacy Policy', 'All rights reserved', 'Share this job', 'Interested in this job?']:
-                    j = body_text.lower().find(e.lower(), start_idx + 50)
-                    if j != -1:
-                        end_idx = j
-                        break
-                chunk = body_text[start_idx:end_idx].strip()
-                if chunk and len(chunk) > 150:
-                    description = self.clean_description(chunk)
+                    end_idx = len(body_text)
+                    for e in ['Similar Jobs', 'Apply now', 'Create as alert', 'Privacy Policy', 'All rights reserved', 'Share this job', 'Interested in this job?']:
+                        j = body_text.lower().find(e.lower(), start_idx + 50)
+                        if j != -1:
+                            end_idx = j
+                            break
+                    chunk = body_text[start_idx:end_idx].strip()
+                    if chunk and len(chunk) > 150:
+                        cleaned_text = self.clean_description(chunk)
+                        # Convert to simple HTML
+                        html_lines = []
+                        for line in cleaned_text.split('\n'):
+                            line = line.strip()
+                            if line:
+                                if line.startswith('- '):
+                                    html_lines.append(f'<li>{line[2:]}</li>')
+                                else:
+                                    html_lines.append(f'<p>{line}</p>')
+                        description = '\n'.join(html_lines)
 
             # Metadata fields commonly shown in sidebar/summary
             stop_labels = ['Category', 'Salary', 'Posted', 'Work type', 'Work Type', 'Contact', 'Reference']
@@ -783,6 +1057,9 @@ class ChandlerMacleodScraper:
                 logger.warning(f"Skipping (insufficient content): {job_url}")
                 return None
 
+            # Generate skills and preferred skills from description
+            skills, preferred_skills = self.generate_skills_from_description(description)
+
             return {
                 'title': title.strip(),
                 'description': description.strip()[:8000],
@@ -800,12 +1077,14 @@ class ChandlerMacleodScraper:
                 'work_mode': 'On-site',
                 'posted_ago': '',
                 'category_raw': category_raw_value,
+                'skills': skills,
+                'preferred_skills': preferred_skills,
             }
         except Exception as e:
             logger.error(f"Error extracting detail from {job_url}: {e}")
             return None
 
-    def save_job(self, data: dict) -> JobPosting | None:
+    def save_job(self, data: dict) -> Optional[JobPosting]:
         try:
             with transaction.atomic():
                 existing = JobPosting.objects.filter(external_url=data['external_url']).first()
@@ -835,6 +1114,8 @@ class ChandlerMacleodScraper:
                     posted_ago=data['posted_ago'],
                     date_posted=data['date_posted'],
                     tags='',
+                    skills=data.get('skills', ''),
+                    preferred_skills=data.get('preferred_skills', ''),
                     additional_info={
                         'scraped_from': 'chandler_macleod',
                         'scraper_version': '1.0'

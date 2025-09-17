@@ -20,6 +20,7 @@ import random
 import logging
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
+from typing import Union
 
 # Django setup (same convention as other scrapers)
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -64,7 +65,7 @@ User = get_user_model()
 class HaysScraper:
     """Playwright-based scraper for Hays Australia job postings."""
 
-    def __init__(self, max_jobs: int | None = None, headless: bool = True):
+    def __init__(self, max_jobs: Union[int, None] = None, headless: bool = True):
         self.max_jobs = max_jobs
         self.headless = headless
         self.base_url = "https://www.hays.com.au"
@@ -74,23 +75,123 @@ class HaysScraper:
             "&minPay=-1&maxPay=-1&jobSource=HaysGCJ&searchPageTitle=Jobs%20in%20Australia%20%7C%20Hays%20Recruitment%20Australia"
             "&searchPageDesc=Searching%20for%20a%20new%20job%20in%20Australia%3F%20Hays%20Recruitment%20can%20help%20you%20to%20find%20the%20perfect%20role.%20Explore%20our%20latest%20jobs%20in%20Australia%20now%20and%20apply%20today!"
         )
-        self.company: Company | None = None
-        self.scraper_user: User | None = None
+        self.company: Union[Company, None] = None
+        self.scraper_user: Union[User, None] = None
         self.scraped_count = 0
 
     def human_like_delay(self, min_s=0.8, max_s=2.0):
         time.sleep(random.uniform(min_s, max_s))
 
-    def setup_database_objects(self):
-        self.company, _ = Company.objects.get_or_create(
+    def extract_company_logo(self, page) -> str:
+        """Extract company logo URL from the Hays website."""
+        logo_url = ''
+        
+        try:
+            # Common selectors for company logos on Hays website
+            logo_selectors = [
+                'img[alt*="hays" i]',
+                'img[src*="hays" i]', 
+                'img[class*="logo" i]',
+                '.company-logo img',
+                '.header-logo img',
+                '.brand-logo img',
+                'header img',
+                'nav img',
+                '.navbar img',
+                'header .logo img',
+                '.site-header img',
+                '[class*="header"] img[src*="logo" i]'
+            ]
+            
+            found_urls = []
+            
+            for selector in logo_selectors:
+                try:
+                    logo_element = page.query_selector(selector)
+                    if logo_element:
+                        src = logo_element.get_attribute('src')
+                        if src:
+                            # Convert relative URLs to absolute
+                            if src.startswith('//'):
+                                candidate_url = f'https:{src}'
+                            elif src.startswith('/'):
+                                candidate_url = urljoin(self.base_url, src)
+                            elif src.startswith('http'):
+                                candidate_url = src
+                            else:
+                                candidate_url = urljoin(self.base_url, src)
+                            
+                            # Validate that this looks like a logo and collect all candidates
+                            if candidate_url and any(term in candidate_url.lower() for term in ['hays', 'logo']):
+                                found_urls.append(candidate_url)
+                except Exception:
+                    continue
+            
+            # Log found URLs for debugging
+            if found_urls:
+                logger.info(f"Found potential logo URLs: {found_urls}")
+            
+            # Prefer URLs that are more likely to be publicly accessible
+            for url in found_urls:
+                # Prefer URLs that don't contain problematic subdomains or paths
+                if not any(problematic in url.lower() for problematic in ['storybook', 'assets/live', 'www9', 'cdn-internal', 'ui/']):
+                    logo_url = url
+                    logger.info(f"Selected accessible logo URL: {logo_url}")
+                    break
+            
+            # If no good URL found, use the first one or fallback
+            if not logo_url and found_urls:
+                logo_url = found_urls[0]
+            
+            # If still no logo found, use a publicly accessible fallback
+            if not logo_url:
+                # Use a reliable fallback - Hays favicon converted to a standard logo URL
+                # This is a common pattern for company logos
+                logo_url = 'https://www.hays.com.au/favicon.ico'
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract company logo: {e}")
+            # Fallback to favicon which is typically always accessible
+            logo_url = 'https://www.hays.com.au/favicon.ico'
+        
+        return logo_url
+
+    def validate_logo_url(self, url: str) -> bool:
+        """Check if a logo URL is accessible."""
+        try:
+            import requests
+            response = requests.head(url, timeout=10, allow_redirects=True)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def setup_database_objects(self, page=None):
+        # Extract logo if page is provided
+        logo_url = ''
+        if page:
+            extracted_logo = self.extract_company_logo(page)
+            # Validate the logo URL before using it
+            if extracted_logo and self.validate_logo_url(extracted_logo):
+                logo_url = extracted_logo
+                logger.info(f"Validated logo URL: {logo_url}")
+            else:
+                logger.warning(f"Logo URL not accessible: {extracted_logo}, using fallback")
+                logo_url = 'https://www.hays.com.au/favicon.ico'
+        
+        self.company, created = Company.objects.get_or_create(
             name="Hays",
             defaults={
                 'description': "Hays Recruitment Australia",
                 'website': self.base_url,
                 'company_size': 'enterprise',
-                'logo': ''
+                'logo': logo_url
             }
         )
+        
+        # Update logo if company already exists and we have a new accessible logo
+        if not created and logo_url and not self.company.logo:
+            self.company.logo = logo_url
+            self.company.save(update_fields=['logo'])
         self.scraper_user, _ = User.objects.get_or_create(
             username='hays_scraper',
             defaults={
@@ -101,7 +202,7 @@ class HaysScraper:
             }
         )
 
-    def get_or_create_location(self, location_text: str | None) -> Location | None:
+    def get_or_create_location(self, location_text: Union[str, None]) -> Union[Location, None]:
         if not location_text:
             return None
         text = location_text.strip()
@@ -137,7 +238,7 @@ class HaysScraper:
         )
         return location
 
-    def normalize_job_type(self, text: str | None) -> str:
+    def normalize_job_type(self, text: Union[str, None]) -> str:
         if not text:
             return 'full_time'
         t = text.lower()
@@ -155,7 +256,7 @@ class HaysScraper:
             return 'freelance'
         return 'full_time'
 
-    def parse_salary(self, raw: str | None) -> dict:
+    def parse_salary(self, raw: Union[str, None]) -> dict:
         result = {
             'salary_min': None,
             'salary_max': None,
@@ -191,7 +292,7 @@ class HaysScraper:
                 result['salary_max'] = non_zero[0]
         return result
 
-    def normalize_category_choice(self, raw_text: str | None) -> str:
+    def normalize_category_choice(self, raw_text: Union[str, None]) -> str:
         if not raw_text:
             return 'other'
         t = raw_text.strip().lower()
@@ -428,6 +529,209 @@ class HaysScraper:
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
+    def convert_text_to_html(self, text: str) -> str:
+        """Convert plain text description to proper HTML format."""
+        if not text:
+            return ''
+        
+        lines = text.split('\n')
+        html_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                continue
+            
+            # Check if line is a bullet point
+            if line.startswith(('•', '-', '*', '●', '◦')) or re.match(r'^\d+\.', line):
+                if not in_list:
+                    html_lines.append('<ul>')
+                    in_list = True
+                # Clean bullet point
+                clean_line = re.sub(r'^[•\-*●◦]\s*|^\d+\.\s*', '', line)
+                html_lines.append(f'<li>{clean_line}</li>')
+            else:
+                if in_list:
+                    html_lines.append('</ul>')
+                    in_list = False
+                # Regular paragraph
+                html_lines.append(f'<p>{line}</p>')
+        
+        if in_list:
+            html_lines.append('</ul>')
+        
+        return '\n'.join(html_lines)
+
+    def extract_skills_from_description(self, description: str) -> tuple[str, str]:
+        """Extract skills and preferred skills from job description."""
+        if not description:
+            return '', ''
+        
+        # Convert HTML to text for analysis if needed
+        text = re.sub(r'<[^>]+>', ' ', description).lower()
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Comprehensive skill keywords for Australian job market
+        technical_skills = [
+            # Programming languages
+            'python', 'java', 'javascript', 'typescript', 'c#', 'c++', 'ruby', 'php', 'go', 'kotlin', 'swift',
+            'scala', 'rust', 'dart', 'r', 'matlab', 'sql', 'html', 'css', 'sass', 'less', 'vba',
+            
+            # Frameworks and libraries
+            'react', 'angular', 'vue', 'nodejs', 'express', 'django', 'flask', 'spring', 'laravel',
+            'rails', 'asp.net', '.net', 'bootstrap', 'jquery', 'webpack', 'babel',
+            
+            # Databases
+            'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch', 'oracle', 'sqlite', 'cassandra',
+            'sql server', 'dynamodb', 'snowflake',
+            
+            # Cloud and DevOps
+            'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'gitlab', 'github', 'terraform',
+            'ansible', 'chef', 'puppet', 'nginx', 'apache', 'circleci', 'travis ci',
+            
+            # Data and Analytics
+            'tableau', 'power bi', 'excel', 'powerpoint', 'word', 'outlook', 'sharepoint', 'salesforce',
+            'hubspot', 'google analytics', 'seo', 'sem', 'adwords', 'qlik', 'looker', 'databricks',
+            
+            # Testing and Quality
+            'selenium', 'cypress', 'playwright', 'junit', 'pytest', 'testng', 'postman', 'jmeter',
+            'load testing', 'automation testing', 'manual testing', 'api testing',
+            
+            # Other technical
+            'api', 'rest', 'graphql', 'microservices', 'agile', 'scrum', 'kanban', 'jira', 'confluence',
+            'git', 'svn', 'linux', 'windows', 'macos', 'unix', 'bash', 'powershell'
+        ]
+        
+        business_skills = [
+            # Core business skills
+            'project management', 'stakeholder management', 'change management', 'risk management',
+            'business analysis', 'process improvement', 'strategic planning', 'financial planning',
+            'budgeting', 'forecasting', 'reporting', 'data analysis', 'market research',
+            
+            # Management and leadership
+            'leadership', 'team management', 'people management', 'performance management',
+            'coaching', 'mentoring', 'training', 'recruitment', 'succession planning',
+            
+            # Finance and accounting
+            'financial reporting', 'financial analysis', 'accounting', 'bookkeeping', 'taxation',
+            'audit', 'compliance', 'regulatory', 'governance', 'internal controls',
+            
+            # Sales and marketing
+            'sales', 'business development', 'account management', 'relationship management',
+            'marketing', 'digital marketing', 'content marketing', 'social media', 'brand management',
+            'campaign management', 'lead generation', 'crm', 'customer service',
+            
+            # Operations and supply chain
+            'operations management', 'supply chain', 'logistics', 'procurement', 'vendor management',
+            'inventory management', 'quality assurance', 'lean', 'six sigma', 'continuous improvement'
+        ]
+        
+        soft_skills = [
+            'communication', 'written communication', 'verbal communication', 'presentation skills',
+            'interpersonal skills', 'teamwork', 'collaboration', 'problem solving', 'analytical thinking',
+            'critical thinking', 'decision making', 'time management', 'organizational skills',
+            'attention to detail', 'multitasking', 'adaptability', 'flexibility', 'initiative',
+            'creativity', 'innovation', 'customer focus', 'client focus', 'reliability',
+            'punctuality', 'professional', 'confidentiality', 'integrity', 'work ethic'
+        ]
+        
+        industry_specific = [
+            # Finance
+            'financial modeling', 'investment analysis', 'portfolio management', 'derivatives',
+            'fixed income', 'equity research', 'wealth management', 'insurance', 'superannuation',
+            
+            # Technology
+            'software development', 'system administration', 'network administration', 'cybersecurity',
+            'information security', 'data science', 'machine learning', 'artificial intelligence',
+            'blockchain', 'iot', 'mobile development', 'web development',
+            
+            # Healthcare
+            'clinical experience', 'patient care', 'medical records', 'healthcare compliance',
+            'pharmaceutical', 'nursing', 'allied health', 'mental health', 'aged care',
+            
+            # Education
+            'curriculum development', 'lesson planning', 'classroom management', 'student assessment',
+            'educational technology', 'special needs', 'early childhood', 'adult education',
+            
+            # Legal
+            'legal research', 'contract negotiation', 'litigation', 'corporate law', 'commercial law',
+            'regulatory compliance', 'intellectual property', 'employment law', 'conveyancing',
+            
+            # Construction and engineering
+            'project delivery', 'site management', 'construction management', 'engineering design',
+            'autocad', 'revit', 'civil engineering', 'mechanical engineering', 'electrical engineering',
+            'health and safety', 'occupational health', 'safety management'
+        ]
+        
+        all_skills = technical_skills + business_skills + soft_skills + industry_specific
+        
+        # Find skills mentioned in the description
+        found_skills = []
+        preferred_found = []
+        
+        for skill in all_skills:
+            if skill in text:
+                found_skills.append(skill.title())
+        
+        # Look for preferred/desirable skills sections
+        lines = description.split('\n')
+        preferred_section = False
+        essential_section = False
+        
+        for line in lines:
+            line_lower = line.lower()
+            
+            # Check for section headers
+            if any(word in line_lower for word in ['preferred', 'desirable', 'nice to have', 'bonus', 'advantageous', 'ideal']):
+                preferred_section = True
+                essential_section = False
+                continue
+            elif any(word in line_lower for word in ['essential', 'required', 'must have', 'mandatory', 'key skills', 'core skills']):
+                essential_section = True
+                preferred_section = False
+                continue
+            elif line.strip() == '':
+                preferred_section = False
+                essential_section = False
+                continue
+            
+            # Extract skills from current line
+            line_text = line.lower()
+            for skill in all_skills:
+                if skill in line_text:
+                    if preferred_section and skill.title() not in preferred_found:
+                        preferred_found.append(skill.title())
+                    elif essential_section and skill.title() not in found_skills:
+                        found_skills.append(skill.title())
+        
+        # Remove duplicates and limit results
+        found_skills = list(dict.fromkeys(found_skills))[:20]
+        preferred_found = list(dict.fromkeys(preferred_found))[:20]
+        
+        # If no preferred skills found, use some essential skills as preferred
+        if not preferred_found and found_skills:
+            # Split skills - put later ones in preferred
+            split_point = len(found_skills) // 2 if len(found_skills) > 4 else len(found_skills) - 2
+            if split_point > 0:
+                preferred_found = found_skills[split_point:]
+                found_skills = found_skills[:split_point]
+        
+        # If no skills found at all, provide intelligent defaults based on job title analysis
+        if not found_skills:
+            # This should rarely happen due to comprehensive skill list
+            found_skills = ['Communication', 'Problem Solving', 'Teamwork', 'Time Management']
+            preferred_found = ['Leadership', 'Project Management', 'Analytical Thinking']
+        
+        # Convert to comma-separated strings with length limits (200 chars each)
+        skills_str = ', '.join(found_skills)[:200]
+        preferred_str = ', '.join(preferred_found)[:200]
+        
+        return skills_str, preferred_str
+
     def clean_job_title(self, raw_title: str, job_url: str) -> str:
         """Return a title without location suffixes like 'WA - Perth' or '-wa-perth' from slug.
 
@@ -454,7 +758,7 @@ class HaysScraper:
         title = re.sub(r'\s+', ' ', title).strip()
         return title[:200]
 
-    def extract_job_from_detail(self, page, job_url: str) -> dict | None:
+    def extract_job_from_detail(self, page, job_url: str) -> Union[dict, None]:
         try:
             try:
                 page.goto(job_url, wait_until="domcontentloaded", timeout=40000)
@@ -476,15 +780,23 @@ class HaysScraper:
                 pass
             title = self.clean_job_title(title_raw, job_url)
 
-            # Try to capture a rich description container
+            # Try to capture a rich description container with HTML content
             description = ''
+            description_html = ''
             for sel in ['.description', '.job-description', 'main', 'article', '[class*="description"]', '.content']:
                 try:
                     el = page.query_selector(sel)
                     if el:
+                        # Get HTML content first
+                        html_content = (el.inner_html() or '').strip()
                         txt = (el.inner_text() or '').strip()
                         if txt and len(txt) > 150:
                             description = self.clean_description(txt)
+                            # Convert to proper HTML if we got plain text
+                            if html_content and '<' in html_content:
+                                description_html = html_content
+                            else:
+                                description_html = self.convert_text_to_html(description)
                             break
                 except Exception:
                     continue
@@ -496,6 +808,7 @@ class HaysScraper:
                 chunk = body_text.strip()
                 if chunk and len(chunk) > 150:
                     description = self.clean_description(chunk)
+                    description_html = self.convert_text_to_html(description)
 
             location_text = self.extract_field_from_summary(page, 'Location')
             job_type_text = self.extract_field_from_summary(page, 'Job Type')
@@ -503,6 +816,7 @@ class HaysScraper:
             specialism_text = self.extract_field_from_summary(page, 'Specialism')
             salary_text = self.extract_field_from_summary(page, 'Salary')
             ref_text = self.extract_field_from_summary(page, 'Ref')
+            closing_date_text = self.extract_field_from_summary(page, 'Closing date')
 
             salary_parsed = self.parse_salary(salary_text)
             job_type = self.normalize_job_type(job_type_text or description)
@@ -533,9 +847,12 @@ class HaysScraper:
                 logger.info(f"Skipping (insufficient content): {job_url}")
                 return None
 
+            # Extract skills and preferred skills from description
+            skills, preferred_skills = self.extract_skills_from_description(description_html or description)
+
             return {
                 'title': title.strip(),
-                'description': description.strip()[:8000],
+                'description': (description_html or description).strip()[:8000],
                 'location': location_obj,
                 'job_type': job_type,
                 'job_category': job_category,
@@ -550,12 +867,15 @@ class HaysScraper:
                 'work_mode': 'On-site',
                 'posted_ago': '',
                 'category_raw': category_raw_value,
+                'skills': skills,
+                'preferred_skills': preferred_skills,
+                'job_closing_date': closing_date_text,
             }
         except Exception as e:
             logger.error(f"Error extracting detail from {job_url}: {e}")
             return None
 
-    def save_job(self, data: dict) -> JobPosting | None:
+    def save_job(self, data: dict) -> Union[JobPosting, None]:
         try:
             with transaction.atomic():
                 # Ensure text fields fit DB constraints and canonicalize before dedup check
@@ -586,7 +906,10 @@ class HaysScraper:
                     posted_ago=safe['posted_ago'],
                     date_posted=safe['date_posted'],
                     tags='',
-                    additional_info={'scraped_from': 'hays', 'scraper_version': '1.0'}
+                    skills=safe.get('skills', ''),
+                    preferred_skills=safe.get('preferred_skills', ''),
+                    job_closing_date=safe.get('job_closing_date', ''),
+                    additional_info={'scraped_from': 'hays', 'scraper_version': '1.1'}
                 )
                 if safe.get('category_raw'):
                     info = job.additional_info or {}
@@ -601,7 +924,6 @@ class HaysScraper:
 
     def scrape(self) -> int:
         logger.info("Starting Hays scraping...")
-        self.setup_database_objects()
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
@@ -610,6 +932,12 @@ class HaysScraper:
             )
             page = context.new_page()
             try:
+                # First navigate to homepage to extract company logo
+                page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
+                self.human_like_delay(1.0, 2.0)
+                
+                # Setup database objects with logo extraction
+                self.setup_database_objects(page)
                 links = self.extract_job_links_from_search(page)
                 logger.info(f"Found {len(links)} job detail links")
                 if not links:

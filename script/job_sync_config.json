@@ -28,6 +28,18 @@
   "sync": {
     "batch_size": 50,
     "incremental": true,
-    "sync_interval_minutes": 60
+    "sync_interval_minutes": 60,
+    "include_system_info": true
+  },
+  "system_info": {
+    "enabled": true,
+    "collect_machine_id": true,
+    "collect_host_name": true,
+    "collect_user_name": true,
+    "log_system_info": true
+  },
+  "encryption": {
+    "enabled": true,
+    "key": "ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg="
   }
-}
+} 

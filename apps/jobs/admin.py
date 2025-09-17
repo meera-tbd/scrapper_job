@@ -4,7 +4,7 @@ Admin configuration for job models.
 
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import JobPosting, JobScript, JobScheduler
+from .models import JobPosting, JobScript, JobScheduler, JobSyncRun, JobSyncPortalResult, JobSyncJobResult
 
 
 @admin.register(JobPosting)
@@ -17,6 +17,7 @@ class JobPostingAdmin(admin.ModelAdmin):
         'location',
         'job_category',
         'job_type',
+        'job_closing_date',
         'salary_display_admin',
         'status',
         'external_source',
@@ -33,7 +34,8 @@ class JobPostingAdmin(admin.ModelAdmin):
         'salary_type',
         'scraped_at',
         'company__company_size',
-        'location__country'
+        'location__country',
+
     ]
 
     search_fields = [
@@ -41,6 +43,8 @@ class JobPostingAdmin(admin.ModelAdmin):
         'company__name',
         'description',
         'tags',
+        'skills',
+        'preferred_skills',
         'location__name',
         'location__city'
     ]
@@ -55,11 +59,11 @@ class JobPostingAdmin(admin.ModelAdmin):
             'fields': ('title', 'slug', 'description', 'company', 'posted_by')
         }),
         ('Job Details', {
-            'fields': ('job_category', 'job_type', 'experience_level', 'work_mode', 'location')
+            'fields': ('job_category', 'job_type', 'experience_level', 'work_mode', 'location', 'job_closing_date','skills', 'preferred_skills')
         }),
         ('Salary Information', {
             'fields': ('salary_min', 'salary_max', 'salary_currency', 'salary_type', 'salary_raw_text'),
-            'classes': ('collapse',)
+            
         }),
         ('External Source', {
             'fields': ('external_source', 'external_url_link', 'external_id', 'expired_at')
@@ -140,3 +144,26 @@ class JobSchedulerAdmin(admin.ModelAdmin):
     list_filter = ['frequency', 'enabled']
     search_fields = ['script__name']
     readonly_fields = ['crontab', 'periodic_task', 'last_run_at']
+
+
+@admin.register(JobSyncRun)
+class JobSyncRunAdmin(admin.ModelAdmin):
+    list_display = ['id', 'status', 'incremental', 'jobs_fetched', 'total_synced', 'started_at', 'finished_at']
+    list_filter = ['status', 'incremental', 'started_at']
+    search_fields = ['id', 'error_message']
+    readonly_fields = ['started_at', 'finished_at']
+
+
+@admin.register(JobSyncPortalResult)
+class JobSyncPortalResultAdmin(admin.ModelAdmin):
+    list_display = ['id', 'run', 'portal_name', 'target_url', 'batch_size', 'success_count', 'failure_count', 'success_rate']
+    list_filter = ['portal_name']
+    search_fields = ['portal_name', 'target_url']
+
+
+@admin.register(JobSyncJobResult)
+class JobSyncJobResultAdmin(admin.ModelAdmin):
+    list_display = ['id', 'run', 'portal_result', 'job_id', 'request_url', 'response_status', 'was_success', 'created_at']
+    list_filter = ['was_success', 'response_status', 'created_at']
+    search_fields = ['job_id', 'request_url', 'error']
+    readonly_fields = ['created_at']

@@ -152,15 +152,15 @@ class SimpleMichaelPageScraper:
         
         return None
     
-    def fetch_full_description(self, job_url):
-        """Fetch and return a clean, full job description from the job detail page.
+    def fetch_full_description_html_and_text(self, job_url):
+        """Fetch and return the job description as sanitized HTML and plain text.
 
-        This keeps the rest of the scraper intact and only enriches the
-        `summary` field with the full description content from the detail page.
+        Returns a tuple: (html_description, plain_text_description, meta_dict).
+        meta_dict may include: location, phone, email extracted from the Job summary panel.
         """
         try:
             if not job_url:
-                return ""
+                return "", "", {}
 
             response = self.session.get(job_url, timeout=30)
             response.raise_for_status()
@@ -176,6 +176,124 @@ class SimpleMichaelPageScraper:
                 'main',
                 'div[role="main"]'
             ]
+
+            def sanitize_container_to_html(container):
+                if not container:
+                    return ""
+                # Remove clearly irrelevant elements (buttons, forms, nav, scripts)
+                for sel in [
+                    'script', 'style', 'form', 'nav', 'header', 'footer',
+                    '.apply', '.save-job', '.apply-link', '.save-links', '.share',
+                    '[class*="apply"]', '[class*="save"]', '[class*="share"]'
+                ]:
+                    for tag in container.select(sel):
+                        tag.decompose()
+                # Drop links that are just actions
+                for a in container.find_all('a'):
+                    text = a.get_text(strip=True).lower()
+                    if any(k in text for k in ['apply', 'save job', 'refer']):
+                        a.decompose()
+                # Remove top-of-page navigation lists like Back to Search / Summary / Similar Jobs / FIFO
+                nav_phrases = [
+                    'back to search', 'job description', 'summary', 'similar jobs',
+                    'newly created position', 'fifo to png'
+                ]
+                for lst in container.find_all(['ul', 'ol']):
+                    lst_text = ' '.join([li.get_text(' ', strip=True).lower() for li in lst.find_all('li')])
+                    if lst_text:
+                        hits = sum(1 for p in nav_phrases if p in lst_text)
+                        if hits >= 2:
+                            lst.decompose()
+                # Explicitly remove any Job summary blocks
+                for hd in container.find_all(['h2', 'h3']):
+                    if 'job summary' in hd.get_text(strip=True).lower():
+                        parent_block = hd.find_parent(['section', 'div']) or hd
+                        try:
+                            parent_block.decompose()
+                        except Exception:
+                            pass
+                # Remove any Diversity & Inclusion boilerplate sections entirely
+                def remove_section_from_heading(heading_tag):
+                    # Remove bullets directly above the heading (often empty teasers)
+                    prev = heading_tag.previous_sibling
+                    while prev is not None and getattr(prev, 'name', None) in ['ul', 'ol', 'br']:
+                        try:
+                            tmp = prev.previous_sibling
+                            prev.decompose()
+                            prev = tmp
+                        except Exception:
+                            break
+                    # Remove the heading and everything until the next heading
+                    node = heading_tag
+                    while node is not None:
+                        nxt = node.next_sibling
+                        try:
+                            node.decompose()
+                        except Exception:
+                            break
+                        if getattr(nxt, 'name', None) in ['h2', 'h3']:
+                            break
+                        node = nxt
+                for hd in list(container.find_all(['h2', 'h3'])):
+                    txt = (hd.get_text(strip=True) or '').lower()
+                    if 'diversity' in txt and 'inclusion' in txt:
+                        remove_section_from_heading(hd)
+                # If there is any content before the first meaningful heading, remove it
+                allowed_headings = [
+                    'about our client', 'job description', 'the successful applicant',
+                    "what's on offer", 'requirements', 'responsibilities', 'skills and experience'
+                ]
+                first_heading = None
+                for hd in container.find_all(['h2', 'h3']):
+                    ht = hd.get_text(strip=True).lower()
+                    if any(h in ht for h in allowed_headings):
+                        first_heading = hd
+                        break
+                if first_heading is not None:
+                    sib = first_heading.previous_sibling
+                    # Remove all siblings before the first meaningful heading
+                    while sib is not None:
+                        prev = sib.previous_sibling
+                        try:
+                            sib.extract()
+                        except Exception:
+                            pass
+                        sib = prev
+                    # Also remove any lists that appear before the first heading anywhere in the container
+                    for pre_list in list(container.find_all(['ul', 'ol'])):
+                        # If the previous heading before the list is None or comes after the list, drop it
+                        prev_heading = pre_list.find_previous(['h2', 'h3'])
+                        if prev_heading is None or prev_heading is not first_heading and prev_heading in first_heading.find_all_previous(['h2','h3']):
+                            try:
+                                pre_list.decompose()
+                            except Exception:
+                                pass
+                # Allow only a small set of tags, unwrap the rest
+                allowed_tags = {'p', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'h2', 'h3', 'br'}
+                for tag in list(container.find_all(True)):
+                    if tag.name not in allowed_tags:
+                        tag.unwrap()
+                # Remove list items that are empty or contain footer contact metadata
+                contact_phrases = ['quote job ref', 'phone number']
+                for li in list(container.find_all('li')):
+                    txt = (li.get_text(' ', strip=True) or '').lower()
+                    if not txt:
+                        li.decompose()
+                        continue
+                    if any(p in txt for p in contact_phrases) or re.match(r'^contact\b', txt):
+                        li.decompose()
+                for p in list(container.find_all('p')):
+                    txt = (p.get_text(' ', strip=True) or '').lower()
+                    if any(pht in txt for pht in contact_phrases) or re.match(r'^contact\b', txt):
+                        p.decompose()
+                # Remove any empty UL/OL created by the cleanup
+                for lst in list(container.find_all(['ul', 'ol'])):
+                    if not lst.find('li'):
+                        lst.decompose()
+                html = str(container)
+                # Light cleanup for excessive whitespace
+                html = re.sub(r"\n\s*\n+", "\n\n", html)
+                return html.strip()
 
             def collect_text(container):
                 if not container:
@@ -315,16 +433,24 @@ class SimpleMichaelPageScraper:
             for sel in preferred_selectors:
                 container = soup.select_one(sel)
                 text = collect_text(container)
+                html = sanitize_container_to_html(container) if container else ""
                 if text and len(text) > 200:  # ensure it's substantive
-                    return text
+                    if html and len(BeautifulSoup(html, 'html.parser').get_text(" ", strip=True)) > 80:
+                        meta = self.extract_job_page_meta(soup)
+                        return html, text, meta
+                    meta = self.extract_job_page_meta(soup)
+                    return "" if not html else html, text, meta
 
             # Generic fallback: use the largest text block inside main/article
             candidates = soup.select('main, article, div[role="main"], div.content, div.region-content')
             best_text = ""
+            best_html = ""
             for c in candidates:
                 text = collect_text(c)
+                html = sanitize_container_to_html(c)
                 if len(text) > len(best_text):
                     best_text = text
+                    best_html = html
             # Cut off at known tail boilerplates if still present
             tail_cuts = [
                 'diversity & inclusion at michael page',
@@ -338,10 +464,267 @@ class SimpleMichaelPageScraper:
                     cut_index = idx if cut_index is None else min(cut_index, idx)
             if cut_index is not None:
                 best_text = best_text[:cut_index]
-            return best_text.strip()
+            # If we still don't have meaningful HTML, build minimal paragraphs/ul from text
+            best_html_text = best_text.strip()
+            html_built = ""
+            if best_html:
+                html_built = best_html
+            elif best_html_text:
+                lines = [ln.strip() for ln in best_html_text.splitlines() if ln.strip()]
+                bullet_lines = [ln[2:].strip() for ln in lines if ln.startswith('- ')]
+                non_bullets = [ln for ln in lines if not ln.startswith('- ')]
+                html_parts = []
+                if non_bullets:
+                    html_parts.extend([f"<p>{re.sub(r'<[^>]+>', '', p)}</p>" for p in non_bullets])
+                if bullet_lines:
+                    html_parts.append('<ul>' + ''.join([f"<li>{re.sub(r'<[^>]+>', '', b)}</li>" for b in bullet_lines]) + '</ul>')
+                html_built = '\n'.join(html_parts)
+            meta = self.extract_job_page_meta(soup)
+            return html_built, best_html_text, meta
         except Exception as e:
             logger.debug(f"Failed to fetch full description: {e}")
-            return ""
+            return "", "", {}
+
+    def extract_job_page_meta(self, soup):
+        """Extract simple metadata from the job detail page (Job summary panel)."""
+        meta = {'location': '', 'phone': '', 'email': ''}
+        try:
+            # Locate a section that contains 'Job summary'
+            container = None
+            for tag in soup.find_all(['section', 'div']):
+                text = tag.get_text(' ', strip=True).lower()
+                if 'job summary' in text and any(k in text for k in ['function', 'location', 'consultant', 'phone']):
+                    container = tag
+                    break
+            if not container:
+                return meta
+            text = container.get_text(' ', strip=True)
+            # Location
+            m = re.search(r'Location\s*([A-Za-z0-9,\-/()\s]+?)(?=(Function|Specialisation|Job\s*Type|Consultant|Phone|Job\s*reference|What\'s on Offer|$))', text, re.I)
+            if m:
+                meta['location'] = m.group(1).strip()
+            # Email
+            m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+            if m:
+                meta['email'] = m.group(0)
+            # Phone
+            m = re.search(r"\+?\d[\d\s()\-]{7,}\d", text)
+            if m:
+                meta['phone'] = m.group(0)
+            # Fallbacks: sometimes contact phone appears at the bottom of the description
+            # as a tel: link or a line labelled "Phone number" rather than inside Job summary.
+            if not meta['phone']:
+                # 1) Look for tel: links anywhere on the page
+                try:
+                    tel_links = soup.select('a[href^="tel:"]')
+                    if tel_links:
+                        tel_val = tel_links[-1].get('href', '')  # prefer the last tel link on the page
+                        tel_val = re.sub(r'^tel:\s*', '', tel_val).strip()
+                        if re.search(r"\+?\d[\d\s()\-]{7,}\d", tel_val):
+                            meta['phone'] = re.search(r"\+?\d[\d\s()\-]{7,}\d", tel_val).group(0)
+                except Exception:
+                    pass
+            if not meta['phone']:
+                # 2) Scan whole page text for a labelled phone pattern; choose the last occurrence
+                try:
+                    full_text = soup.get_text(' ', strip=True)
+                    # Prefer numbers that are explicitly labelled with Phone/Phone number
+                    labelled_matches = list(re.finditer(r"(?:phone(?:\s*number)?\s*[:\-]?\s*)(\+?\d[\d\s()\-]{7,}\d)", full_text, re.I))
+                    if labelled_matches:
+                        meta['phone'] = labelled_matches[-1].group(1)
+                    else:
+                        # As a final fallback, pick the last phone-like number on the page
+                        generic_matches = list(re.finditer(r"\+?\d[\d\s()\-]{7,}\d", full_text))
+                        if generic_matches:
+                            meta['phone'] = generic_matches[-1].group(0)
+                except Exception:
+                    pass
+        finally:
+            return meta
+
+    def extract_skills_from_text(self, text, max_items=12):
+        """Keyword fallback skill extractor from plain text only (broad).
+
+        Returns tuple (skills_csv, preferred_csv).
+        """
+        if not text:
+            return "", ""
+        normalized = re.sub(r"[^a-z0-9\s\+\.#/&-]", " ", text.lower())
+        skill_keywords = [
+            'python', 'java', 'c#', 'c++', 'javascript', 'typescript', 'node', 'react', 'angular', 'vue',
+            'django', 'flask', 'spring', 'dotnet', '.net', 'sql', 'mysql', 'postgresql', 'oracle',
+            'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'linux', 'git', 'terraform',
+            'excel', 'power bi', 'tableau', 'sap', 'salesforce', 'xero', 'netsuite',
+            'project management', 'agile', 'scrum', 'jira', 'confluence',
+            'communication', 'stakeholder management', 'leadership', 'problem solving',
+            'customer service', 'food hygiene', 'safety', 'environmental', 'cleaning standards'
+        ]
+        found = []
+        for kw in skill_keywords:
+            pattern = r"\b" + re.escape(kw.replace('.', '\\.')) + r"\b"
+            if re.search(pattern, normalized):
+                found.append(kw)
+        dedup = []
+        seen = set()
+        for kw in found:
+            if kw not in seen:
+                seen.add(kw)
+                dedup.append(kw)
+        if not dedup:
+            return "", ""
+        dedup = dedup[:max_items]
+        # Split across both fields to maximize capacity
+        skills_list = []
+        preferred_list = []
+        char_limit = 200
+        # pack into skills first, then preferred
+        for item in dedup:
+            csv_try = (", ".join(skills_list + [item])).strip(', ')
+            if len(csv_try) <= char_limit:
+                skills_list.append(item)
+            else:
+                csv_try2 = (", ".join(preferred_list + [item])).strip(', ')
+                if len(csv_try2) <= char_limit:
+                    preferred_list.append(item)
+        return ", ".join(skills_list), ", ".join(preferred_list)
+
+    def extract_skills_from_description(self, html_description, plain_text):
+        """Primary extractor: parse bullets under relevant headings and pack across both fields.
+
+        We collect all <li> items under headings like 'The Successful Applicant',
+        'Skills and Experience', 'Requirements', or 'Key Responsibilities'.
+        Then we distribute them across `skills` and `preferred_skills` fields
+        honoring each field's 200 character limit so we keep as much as possible.
+        If no bullets are found, fall back to keyword extraction from plain text.
+        """
+        items = []
+        try:
+            if html_description:
+                soup = BeautifulSoup(html_description, 'html.parser')
+                target_headings = [
+                    'the successful applicant', 'skills and experience', 'requirements',
+                    'key responsibilities', 'responsibilities', 'your profile'
+                ]
+                headings = soup.find_all(['h2', 'h3'])
+                for h in headings:
+                    htxt = (h.get_text(strip=True) or '').lower()
+                    if any(t in htxt for t in target_headings):
+                        for sib in h.find_all_next():
+                            if sib.name in ['h2', 'h3']:
+                                break
+                            if sib.name in ['ul', 'ol']:
+                                for li in sib.find_all('li'):
+                                    t = li.get_text(' ', strip=True)
+                                    if t:
+                                        items.append(t)
+            # fallback scan of plain text for lines beginning with '- '
+            if not items and plain_text:
+                for ln in plain_text.splitlines():
+                    ln = ln.strip()
+                    if ln.startswith('- '):
+                        items.append(ln[2:].strip())
+        except Exception:
+            pass
+
+        # Deduplicate and pack into two CSVs within limits
+        def pack(items_list):
+            seen = set()
+            unique = []
+            for it in items_list:
+                n = re.sub(r'\s+', ' ', it.strip())
+                if not n:
+                    continue
+                if n.lower() in seen:
+                    continue
+                seen.add(n.lower())
+                unique.append(n)
+            char_limit = 200
+            s1, s2 = [], []
+            for it in unique:
+                try1 = (', '.join(s1 + [it])).strip(', ')
+                if len(try1) <= char_limit:
+                    s1.append(it)
+                else:
+                    try2 = (', '.join(s2 + [it])).strip(', ')
+                    if len(try2) <= char_limit:
+                        s2.append(it)
+                    else:
+                        break
+            return ', '.join(s1), ', '.join(s2)
+
+        if items:
+            return pack(items)
+        # Fallback
+        return self.extract_skills_from_text(plain_text or '')
+
+    def fetch_company_details(self, target_city_hint=None):
+        """Scrape Michael Page logo and a contact method from the website.
+
+        Returns dict with keys: logo, email, phone, details_url, address_line1, city, state, postcode.
+        """
+        details = {
+            'logo': '', 'email': '', 'phone': '', 'details_url': '',
+            'address_line1': '', 'city': '', 'state': '', 'postcode': ''
+        }
+        # Try to get logo from home page
+        try:
+            resp = self.session.get(self.base_url, timeout=30)
+            resp.raise_for_status()
+            home = BeautifulSoup(resp.text, 'html.parser')
+            logo_img = home.select_one('img[alt*="Michael Page" i]')
+            if logo_img and logo_img.get('src'):
+                details['logo'] = urljoin(self.base_url, logo_img['src'])
+        except Exception:
+            pass
+        # Try to get contact details from contact page
+        try:
+            contact_url = urljoin(self.base_url, '/contact')
+            resp = self.session.get(contact_url, timeout=30)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            details['details_url'] = contact_url
+            # Find office cards
+            office_cards = soup.select('div[class*="card"], div[class*="contact"], div[class*="office"], section div')
+            selected = None
+            target_city = (target_city_hint or '').lower()
+            for card in office_cards:
+                heading = card.find(['h2', 'h3'])
+                heading_text = heading.get_text(strip=True) if heading else ''
+                if not heading_text:
+                    continue
+                ht_low = heading_text.lower()
+                if target_city and target_city in ht_low:
+                    selected = card
+                    break
+                if 'sydney' in ht_low and selected is None:
+                    selected = card  # default to Sydney if nothing better
+            selected = selected or (office_cards[0] if office_cards else None)
+            if selected:
+                # email and phone patterns
+                text = selected.get_text(" ", strip=True)
+                email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+                phone_match = re.search(r"\+?\d[\d\s()\-]{7,}\d", text)
+                if email_match:
+                    details['email'] = email_match.group(0)
+                if phone_match:
+                    details['phone'] = phone_match.group(0)
+                # Follow details link if present to fetch street address
+                link = selected.find('a', href=True)
+                if link:
+                    details['details_url'] = urljoin(self.base_url, link['href'])
+                    try:
+                        r2 = self.session.get(details['details_url'], timeout=30)
+                        r2.raise_for_status()
+                        s2 = BeautifulSoup(r2.text, 'html.parser')
+                        addr = s2.find('address') or s2.select_one('[class*="address" i]')
+                        if addr:
+                            addr_text = addr.get_text(" ", strip=True)
+                            details['address_line1'] = addr_text
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return details
 
     def parse_location(self, location_string):
         """Parse location string into normalized location data."""
@@ -693,6 +1076,37 @@ class SimpleMichaelPageScraper:
                         'company_size': 'large'
                     }
                 )
+                # Enrich company with logo and contact if missing
+                try:
+                    needs_update = any([
+                        not company_obj.logo,
+                        not company_obj.email,
+                        not company_obj.phone,
+                        not company_obj.address_line1,
+                    ])
+                    if needs_update:
+                        _, city, state, _ = self.parse_location(job_data.get('location_text', ''))
+                        info = self.fetch_company_details(target_city_hint=city or state)
+                        updated = False
+                        if info.get('logo') and not company_obj.logo:
+                            company_obj.logo = info['logo']
+                            updated = True
+                        if info.get('email') and not company_obj.email:
+                            company_obj.email = info['email']
+                            updated = True
+                        if info.get('phone') and not company_obj.phone:
+                            company_obj.phone = info['phone']
+                            updated = True
+                        if info.get('address_line1') and not company_obj.address_line1:
+                            company_obj.address_line1 = info['address_line1']
+                            updated = True
+                        if info.get('details_url') and not company_obj.details_url:
+                            company_obj.details_url = info['details_url']
+                            updated = True
+                        if updated:
+                            company_obj.save(update_fields=['logo', 'email', 'phone', 'address_line1', 'details_url', 'updated_at'])
+                except Exception as e:
+                    logger.debug(f"Could not enrich company details: {e}")
                 
                 # Parse salary
                 salary_min, salary_max, currency, salary_type, raw_text = self.parse_salary(
@@ -747,7 +1161,7 @@ class SimpleMichaelPageScraper:
                 # Automatic job categorization
                 job_category = JobCategorizationService.categorize_job(
                     title=job_data.get('job_title', ''),
-                    description=job_data.get('summary', '')
+                    description=BeautifulSoup(job_data.get('summary_html', '') or job_data.get('summary', ''), 'html.parser').get_text(' ', strip=True)
                 )
                 
                 # Create unique slug
@@ -759,10 +1173,14 @@ class SimpleMichaelPageScraper:
                     counter += 1
                 
                 # Create the JobPosting
+                # Extract skills/preferred skills from description (prefer bullet items under headings)
+                plain_text_for_skills = BeautifulSoup(job_data.get('summary_html', '') or job_data.get('summary', ''), 'html.parser').get_text(' ', strip=True)
+                skills_csv, preferred_csv = self.extract_skills_from_description(job_data.get('summary_html', ''), plain_text_for_skills)
+
                 job_posting = JobPosting.objects.create(
                     title=job_data.get('job_title', ''),
                     slug=unique_slug,
-                    description=job_data.get('summary', 'No description available'),
+                    description=job_data.get('summary_html', '') or job_data.get('summary', 'No description available'),
                     company=company_obj,
                     posted_by=self.system_user,
                     location=location_obj,
@@ -780,7 +1198,9 @@ class SimpleMichaelPageScraper:
                     status='active',
                     posted_ago=job_data.get('posted_ago', ''),
                     date_posted=date_posted,
-                    additional_info=job_data
+                    additional_info=job_data,
+                    skills=skills_csv,
+                    preferred_skills=preferred_csv
                 )
                 
                 logger.info(f"[SAVED TO DATABASE]")
@@ -964,11 +1384,24 @@ class SimpleMichaelPageScraper:
                             logger.debug(f"Quick duplicate check failed: {e}")
                             pass  # Continue with normal processing if quick check fails
 
-                    # Enrich summary with full description from the detail page
+                    # Enrich summary with full description (HTML + text) from the detail page
                     try:
-                        full_desc = self.fetch_full_description(job_url)
-                        if full_desc:
-                            job_data['summary'] = full_desc
+                        html_desc, full_text, meta = self.fetch_full_description_html_and_text(job_url)
+                        if html_desc or full_text:
+                            # Store HTML for description and keep plain text as backup
+                            if html_desc:
+                                job_data['summary_html'] = html_desc
+                            if full_text:
+                                job_data['summary'] = full_text
+                            # Capture any meta (more accurate location/phone/email)
+                            # Respect request to ignore Job summary section for description,
+                            # but it's safe to use its location/contact for data accuracy.
+                            if meta.get('location'):
+                                job_data['location_text'] = meta['location']
+                            if meta.get('phone'):
+                                job_data['contact_phone'] = meta['phone']
+                            if meta.get('email'):
+                                job_data['contact_email'] = meta['email']
                     except Exception as e:
                         logger.debug(f"Could not enrich description: {e}")
                     

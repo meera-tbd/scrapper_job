@@ -1,10 +1,10 @@
 import concurrent.futures
 import logging
-import re
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 import requests
-from django.db import transaction
+from dateutil import parser as date_parser
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.jobs.models import JobPosting
@@ -31,15 +31,6 @@ TTL_BY_SOURCE = {
 }
 
 
-# Phrases that often indicate a closed/expired job page
-CLOSED_PATTERNS = [
-    re.compile(r"job (no longer|is no longer) (available|active|open)", re.I),
-    re.compile(r"this (position|job) (has )?closed", re.I),
-    re.compile(r"we are no longer accepting applications", re.I),
-    re.compile(r"was not found|page not found", re.I),
-]
-
-
 def _requests_session(timeout_seconds: int = 5) -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -47,116 +38,146 @@ def _requests_session(timeout_seconds: int = 5) -> requests.Session:
     return session
 
 
-def _url_indicates_closed(session: requests.Session, url: str) -> bool:
+def _url_is_404(session: requests.Session, url: str) -> bool:
+    """Return True only when the URL clearly returns HTTP 404/410 (missing/gone).
+
+    We do not parse page content; only status codes matter for this rule.
+    """
     try:
-        # Try HEAD first
         resp = session.head(url, allow_redirects=True, timeout=5)
-        status = resp.status_code
-        if status in (404, 410):
+        if resp.status_code in (404, 410):
             return True
-        if status in (301, 302, 303, 307, 308):
-            # If redirected, a GET on the final URL may reveal a closure message
-            pass
-
-        # Fallback to GET when inconclusive
+        # Fallback to GET for sites not supporting HEAD correctly
         resp = session.get(url, allow_redirects=True, timeout=5)
-        status = resp.status_code
-        if status in (404, 410):
+        if resp.status_code in (404, 410):
             return True
-        if status == 200:
-            html = resp.text
-            for pat in CLOSED_PATTERNS:
-                if pat.search(html):
-                    return True
-        # 5xx should be treated as transient
-        return False
     except requests.RequestException:
-        # Network error: do not expire based solely on error
+        # Network or TLS error: treat as inconclusive
         return False
+    return False
 
 
-def _ttl_expired(job: JobPosting, now) -> bool:
-    posted = job.date_posted or job.scraped_at or job.updated_at
-    ttl_days = TTL_BY_SOURCE.get(job.external_source, TTL_BY_SOURCE["default"])
-    if not posted:
-        return False
-    return posted < now - timedelta(days=ttl_days)
+def _parse_closing_date(raw_value: str) -> datetime | None:
+    """Parse the `job_closing_date` string into a timezone-aware datetime.
+
+    - Accepts many formats via dateutil.parser
+    - If time is missing, assume end-of-day (23:59:59)
+    - Returns None when parsing fails
+    """
+    if not raw_value:
+        return None
+    try:
+        dt = date_parser.parse(raw_value, dayfirst=True, fuzzy=True)
+    except (ValueError, TypeError):
+        return None
+
+    # If parsed value has no time (midnight), interpret as end-of-day
+    if dt.time() == time(0, 0):
+        dt = datetime.combine(dt.date(), time(23, 59, 59))
+
+    # Make timezone-aware if naive
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    return dt
 
 
-def _expire_job(job: JobPosting) -> None:
+def _set_job_status(job: JobPosting, new_status: str) -> None:
     now = timezone.now()
-    job.status = "expired"
-    # Set expired_at only once; keep original if already set
-    if not getattr(job, "expired_at", None):
+    job.status = new_status
+    if new_status == "expired" and not getattr(job, "expired_at", None):
         job.expired_at = now
-    job.updated_at = now
-    job.save(update_fields=["status", "expired_at", "updated_at"])
+        job.updated_at = now
+        job.save(update_fields=["status", "expired_at", "updated_at"])
+    else:
+        job.updated_at = now
+        job.save(update_fields=["status", "updated_at"])
 
 
 def run(batch_size: int = 1000, retention_days: int = 90, parallelism: int = 16):
     """
-    Expire outdated jobs automatically and cleanup long-expired rows.
+    Update job statuses based on closing date and external URL 404 checks.
+
+    Rules:
+    - If `job_closing_date` is present and in the past -> status "expired"
+    - If no `job_closing_date` and external URL returns 404/410 -> status "inactive"
+    - Otherwise -> status "active" (does not revive already expired/filled jobs)
 
     Returns a summary dict.
     """
     now = timezone.now()
     session = _requests_session()
 
-    # 1) URL-first checks for older active jobs (skip very fresh to reduce noise)
-    url_check_cutoff = now - timedelta(days=3)
+    # 1) Closing-date based updates
+    expired_by_closing_date = 0
+    set_active_by_closing_date = 0
+    closing_qs = (
+        JobPosting.objects
+        .filter(job_closing_date__isnull=False)
+        .exclude(job_closing_date__exact="")
+        .only("id", "job_closing_date", "status", "expired_at", "updated_at")
+        [:batch_size]
+    )
+    for job in closing_qs:
+        closing_dt = _parse_closing_date(job.job_closing_date)
+        if closing_dt and closing_dt <= now:
+            # Do not override 'filled' jobs
+            if job.status not in ("expired", "filled"):
+                _set_job_status(job, "expired")
+                expired_by_closing_date += 1
+        else:
+            # Not past closing date -> keep active unless it is already expired/filled
+            if job.status not in ("active", "expired", "filled"):
+                _set_job_status(job, "active")
+                set_active_by_closing_date += 1
 
-    candidates = (
-        JobPosting.objects.filter(status="active", scraped_at__lt=url_check_cutoff)
-        .order_by("scraped_at")
-        .values("id", "external_url")[:batch_size]
+    # 2) For jobs without a closing date: URL 404/410 -> inactive, else active
+    inactive_by_404 = 0
+    set_active_by_url = 0
+
+    no_date_q = Q(job_closing_date__isnull=True) | Q(job_closing_date__exact="")
+    status_q = Q(status__in=["active", "inactive"])  # do not touch expired/filled
+    url_qs = (
+        JobPosting.objects
+        .filter(no_date_q & status_q)
+        .only("id", "external_url", "status", "updated_at")
+        [:batch_size]
     )
 
-    url_check_ids = [c["id"] for c in candidates]
-    url_map = {c["id"]: c["external_url"] for c in candidates}
-
-    expired_by_url = 0
-    if url_check_ids:
-        def check_one(job_id: int) -> tuple[int, bool]:
-            url = url_map[job_id]
-            is_closed = _url_indicates_closed(session, url)
-            return job_id, is_closed
+    id_to_url = {j.id: j.external_url for j in url_qs}
+    if id_to_url:
+        def check(job_id: int) -> tuple[int, bool]:
+            return job_id, _url_is_404(session, id_to_url[job_id])
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as pool:
-            for job_id, is_closed in pool.map(check_one, url_check_ids):
-                if is_closed:
-                    try:
-                        job = JobPosting.objects.get(id=job_id)
-                        if job.status == "active":
-                            _expire_job(job)
-                            expired_by_url += 1
-                    except JobPosting.DoesNotExist:
-                        pass
+            for job_id, is_404 in pool.map(check, list(id_to_url.keys())):
+                try:
+                    job = JobPosting.objects.get(id=job_id)
+                except JobPosting.DoesNotExist:
+                    continue
 
-    # 2) Age-based TTL fallback for remaining active jobs
-    expired_by_age = 0
-    remaining = JobPosting.objects.filter(status="active").only(
-        "id", "external_source", "date_posted", "scraped_at", "updated_at"
-    )
-    for job in remaining:
-        if _ttl_expired(job, now):
-            _expire_job(job)
-            expired_by_age += 1
+                if is_404:
+                    if job.status != "inactive":
+                        _set_job_status(job, "inactive")
+                        inactive_by_404 += 1
+                else:
+                    if job.status != "active":
+                        _set_job_status(job, "active")
+                        set_active_by_url += 1
 
-    # 3) Cleanup: delete expired older than retention window
+    # 3) Optional cleanup: delete very old expired rows
+    # Keep this behavior to prevent DB bloat; can be disabled by setting a large retention
     deleted = 0
-    with transaction.atomic():
-        qs = JobPosting.objects.filter(
-            status="expired",
-            updated_at__lt=now - timedelta(days=retention_days),
-        )
-        deleted = qs.count()
-        if deleted:
-            qs.delete()
+    expired_cutoff = now - timedelta(days=retention_days)
+    old_expired = JobPosting.objects.filter(status="expired", updated_at__lt=expired_cutoff)
+    deleted = old_expired.count()
+    if deleted:
+        old_expired.delete()
 
     summary = {
-        "checked_url": len(url_check_ids),
-        "expired_by_url": expired_by_url,
-        "expired_by_age": expired_by_age,
+        "expired_by_closing_date": expired_by_closing_date,
+        "set_active_by_closing_date": set_active_by_closing_date,
+        "inactive_by_404": inactive_by_404,
+        "set_active_by_url": set_active_by_url,
         "deleted": deleted,
         "at": now.isoformat(),
     }
