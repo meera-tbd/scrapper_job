@@ -11,7 +11,10 @@ class CompanyListSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Company
-        fields = ['id', 'name', 'slug', 'description', 'created_at', 'updated_at']
+        fields = [
+            'id', 'name', 'slug', 'description', 'website', 'company_size',
+            'city', 'state', 'country', 'phone', 'email', 'created_at', 'updated_at'
+        ]
         depth = 1  # Include related data with depth
         read_only_fields = ['id', 'slug', 'created_at', 'updated_at']
 
@@ -22,7 +25,8 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Company
         fields = [
-            'id', 'name', 'slug', 'description', 'website', 'company_size', 
-            'logo', 'created_at', 'updated_at'
+            'id', 'name', 'slug', 'description', 'website', 'company_size',
+            'address_line1', 'address_line2', 'city', 'state', 'postcode', 'country',
+            'phone', 'email', 'details_url', 'logo', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'slug', 'created_at', 'updated_at']

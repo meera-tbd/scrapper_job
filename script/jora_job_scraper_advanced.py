@@ -317,10 +317,15 @@ class JoraJobScraper:
             return None
     
     def extract_full_job_description(self, page, job_url):
-        """Visit individual job page to extract full description."""
+        """Visit individual job page to extract full description (as HTML) and posted text.
+
+        Returns a dict with keys:
+        - 'html': HTML string of the description (may be empty string)
+        - 'posted_text': relative posted text if found on detail page (e.g., '26m ago')
+        """
         try:
             if not job_url:
-                return ""
+                return {'html': '', 'posted_text': ''}
             
             self.logger.info(f"Fetching full description from: {job_url[:100]}...")
             
@@ -338,37 +343,42 @@ class JoraJobScraper:
                 '.job-posting-description',             # Fallback - Job posting description
             ]
             
-            full_description = ""
+            full_description_html = ""
+            detail_posted_text = ""
             
             # Try each selector to find the job description
             for selector in description_selectors:
                 try:
                     description_element = page.query_selector(selector)
                     if description_element:
-                        text = description_element.inner_text().strip()
-                        if text and len(text) > 50:  # Ensure we get substantial content
-                            full_description = text
+                        # Preserve HTML formatting
+                        html = (description_element.inner_html() or '').strip()
+                        plain_len = len(re.sub(r'<[^>]+>', '', html)) if html else 0
+                        if html and plain_len > 50:  # Ensure substantial content
+                            full_description_html = html
                             if selector == '#job-description-container':
-                                self.logger.info(f"Found SPECIFIC job-description-container ({len(text)} chars)")
+                                self.logger.info(f"Found SPECIFIC job-description-container (html {len(html)} chars)")
                             else:
-                                self.logger.info(f"Found description using fallback selector: {selector} ({len(text)} chars)")
+                                self.logger.info(f"Found description using fallback selector: {selector} (html {len(html)} chars)")
                             break
                 except Exception as e:
                     continue
             
             # If no specific selector worked, try to get all text content from main areas
-            if not full_description:
+            if not full_description_html:
                 try:
                     # Get text from main content areas
                     main_content = page.query_selector('main, .main, #main, .container, .wrapper')
                     if main_content:
-                        full_description = main_content.inner_text().strip()
-                        self.logger.info(f"Extracted description from main content area ({len(full_description)} chars)")
+                        fallback_text = (main_content.inner_text() or '').strip()
+                        paragraphs = ['<p>' + re.sub(r'[\r\n]+', ' ', p).strip() + '</p>' for p in fallback_text.split('\n') if p.strip()]
+                        full_description_html = ''.join(paragraphs)
+                        self.logger.info(f"Extracted description from main content area (html {len(full_description_html)} chars)")
                 except Exception as e:
                     pass
             
             # Final fallback - get all visible text and filter for job-related content
-            if not full_description:
+            if not full_description_html:
                 try:
                     all_text = page.inner_text('body')
                     # Basic filtering to get job-related content
@@ -383,16 +393,38 @@ class JoraJobScraper:
                             job_lines.append(line)
                     
                     if job_lines:
-                        full_description = '\n'.join(job_lines[:50])  # Take first 50 relevant lines
-                        self.logger.info(f"Extracted filtered description ({len(full_description)} chars)")
+                        fallback_text = '\n'.join(job_lines[:50])  # Take first 50 relevant lines
+                        paragraphs = ['<p>' + re.sub(r'[\r\n]+', ' ', p).strip() + '</p>' for p in fallback_text.split('\n') if p.strip()]
+                        full_description_html = ''.join(paragraphs)
+                        self.logger.info(f"Extracted filtered description (html {len(full_description_html)} chars)")
                 except Exception as e:
                     pass
-            
-            return full_description
+
+            # Extract more precise posted text from detail page if available
+            try:
+                posted_selectors = [
+                    '[data-testid="job-meta"]', '.job-meta', '.posted', '.date', 'time',
+                    'span:has-text("ago")', 'div:has-text("ago")'
+                ]
+                for selector in posted_selectors:
+                    try:
+                        el = page.query_selector(selector)
+                        if el:
+                            txt = (el.inner_text() or '').strip()
+                            if re.search(r'\b\d+\s*(m|min|mins|minute|minutes|h|hr|hour|hours|day|days|week|weeks|month|months)\b', txt, re.I) or 'ago' in txt.lower():
+                                m = re.search(r'\b\d+\s*(?:m|min|mins|minute|minutes|h|hr|hour|hours|day|days|week|weeks|month|months)\b\s*(?:ago)?', txt, re.I)
+                                detail_posted_text = m.group(0) if m else txt
+                                break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            return {'html': full_description_html, 'posted_text': detail_posted_text}
             
         except Exception as e:
             self.logger.error(f"Error extracting full job description from {job_url}: {e}")
-            return ""
+            return {'html': '', 'posted_text': ''}
     
     def parse_relative_date(self, date_text):
         """Parse relative date strings like 'Posted 3 days ago' into timezone-aware dates."""
@@ -405,7 +437,7 @@ class JoraJobScraper:
             today = now.date()
             
             # Handle "today" or "just posted"
-            if 'today' in date_text or 'just posted' in date_text:
+            if 'today' in date_text or 'just posted' in date_text or 'just now' in date_text:
                 return now.replace(hour=9, minute=0, second=0, microsecond=0)  # Assume 9 AM posting
             
             # Handle "yesterday"
@@ -418,7 +450,11 @@ class JoraJobScraper:
             if numbers:
                 number = int(numbers[0])
                 
-                if 'hour' in date_text:
+                # Minutes
+                if re.search(r'\b(m|min|mins|minute|minutes)\b', date_text):
+                    return now - timedelta(minutes=number)
+                # Hours
+                if 'hour' in date_text or re.search(r'\b(h|hr|hrs)\b', date_text):
                     return now - timedelta(hours=number)
                 elif 'day' in date_text:
                     past_date = now - timedelta(days=number)
@@ -546,6 +582,81 @@ class JoraJobScraper:
         
         return min_salary, max_salary, currency, period, salary_text
     
+    def _strip_html(self, html):
+        """Convert HTML to plain text while preserving minimal line breaks."""
+        try:
+            if not html:
+                return ''
+            text = re.sub(r'<\s*br\s*/?>', '\n', html, flags=re.I)
+            text = re.sub(r'</\s*p\s*>', '\n', text, flags=re.I)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+        except Exception:
+            return html or ''
+
+    def extract_skills_from_description(self, description_html):
+        """Heuristic extraction of skills and preferred skills from description HTML.
+
+        Returns (skills_list, preferred_skills_list).
+        """
+        text = (self._strip_html(description_html) or '').lower()
+        if not text:
+            return [], []
+
+        base_skills = [
+            'python','django','flask','javascript','typescript','react','angular','vue','node','java','spring',
+            'c#','dotnet','go','golang','php','laravel','ruby','rails','sql','mysql','postgres','mongodb','redis',
+            'aws','azure','gcp','docker','kubernetes','git','linux','bash','powershell','html','css','sass','ci/cd',
+            'terraform','ansible','kafka','spark','hadoop','pandas','numpy','excel','communication','leadership',
+            'customer service','sales','negotiation','problem solving','time management','attention to detail',
+            'driving','safety','first aid','data entry','inventory','reporting','microsoft office','excel','word',
+            'meter reading','field work','physical fitness','outdoor work','teamwork','reliability','punctuality'
+        ]
+
+        def pick_keywords(segment):
+            found = []
+            for skill in base_skills:
+                if skill in segment:
+                    found.append(skill)
+            return found
+
+        skills = set()
+        preferred = set()
+
+        requirement_cues = ['requirements', 'must have', 'you will have', 'we require', 'skills', 'what you bring']
+        preferred_cues = ['nice to have', 'preferred', 'desirable', 'bonus', 'ideally', 'advantage']
+
+        for cue in requirement_cues:
+            for m in re.finditer(cue, text):
+                window = text[max(0, m.start()-120): m.end()+220]
+                for kw in pick_keywords(window):
+                    skills.add(kw)
+
+        for cue in preferred_cues:
+            for m in re.finditer(cue, text):
+                window = text[max(0, m.start()-120): m.end()+220]
+                for kw in pick_keywords(window):
+                    preferred.add(kw)
+
+        if not skills:
+            for kw in base_skills:
+                if kw in text:
+                    skills.add(kw)
+
+        preferred.difference_update(skills)
+        # Ensure both lists are populated
+        default_core = ['communication', 'teamwork', 'problem solving', 'time management']
+        if not skills and not preferred:
+            skills.update(default_core)
+            preferred.update(default_core)
+        elif not skills and preferred:
+            skills.update(preferred)
+        elif skills and not preferred:
+            preferred.update(skills)
+
+        return sorted(skills), sorted(preferred)
+    
     def save_job_to_database_sync(self, job_data):
         """Synchronous database save function to be called from thread."""
         try:
@@ -646,13 +757,13 @@ class JoraJobScraper:
                     }
                 )
                 
-                # Create job posting - full description preserved, only specific fields truncated for DB constraints
+                # Create job posting - store HTML description if available
                 job_posting = JobPosting.objects.create(
                     title=job_title[:200] if len(job_title) > 200 else job_title,  # CharField(200) - smart truncation
                     company=company_obj,
                     location=location_obj,
                     posted_by=scraper_user,
-                    description=job_data.get('full_description', job_data.get('summary', '')),  # TextField - full description preserved!
+                    description=job_data.get('full_description_html') or job_data.get('full_description', job_data.get('summary', '')),
                     external_url=job_url[:200] if len(job_url) > 200 else job_url,  # URLField(200) - smart truncation
                     external_source='jora_au',  # This is short, no truncation needed
                     job_category=category if category else 'other',
@@ -667,6 +778,32 @@ class JoraJobScraper:
                     date_posted=job_data.get('date_posted'),
                     status='active'
                 )
+
+                # Populate skills and preferred_skills if model has those fields
+                try:
+                    skills_list, preferred_list = self.extract_skills_from_description(
+                        job_data.get('full_description_html') or job_data.get('full_description') or ''
+                    )
+                    # Guarantee both fields will be populated with at least defaults
+                    if not skills_list and preferred_list:
+                        skills_list = list(preferred_list)
+                    if skills_list and not preferred_list:
+                        preferred_list = list(skills_list)
+                    if not skills_list and not preferred_list:
+                        skills_list = ['communication', 'teamwork', 'problem solving', 'time management']
+                        preferred_list = list(skills_list)
+
+                    update_fields = []
+                    if hasattr(job_posting, 'skills'):
+                        job_posting.skills = ', '.join(skills_list)
+                        update_fields.append('skills')
+                    if hasattr(job_posting, 'preferred_skills'):
+                        job_posting.preferred_skills = ', '.join(preferred_list)
+                        update_fields.append('preferred_skills')
+                    if update_fields:
+                        job_posting.save(update_fields=update_fields)
+                except Exception as e:
+                    self.logger.warning(f"Failed to set skills fields: {e}")
                 
                 self.logger.info(f"Saved job: {job_title} at {company_name}")
                 self.logger.info(f"  Category: {category}")
@@ -864,14 +1001,19 @@ class JoraJobScraper:
                             context = page.context
                             detail_page = context.new_page()
                             
-                            full_description = self.extract_full_job_description(detail_page, job_data['job_url'])
-                            job_data['full_description'] = full_description
-                            self.logger.info(f"Extracted description: {len(full_description)} characters")
+                            detail_result = self.extract_full_job_description(detail_page, job_data['job_url'])
+                            job_data['full_description_html'] = detail_result.get('html', '')
+                            job_data['full_description'] = self._strip_html(job_data.get('full_description_html'))
+                            if detail_result.get('posted_text'):
+                                job_data['posted_ago'] = detail_result.get('posted_text')
+                                job_data['date_posted'] = self.parse_relative_date(detail_result.get('posted_text'))
+                            self.logger.info(f"Extracted description (html): {len(job_data['full_description_html'])} characters")
                             
                             # Close the detail page to free resources
                             detail_page.close()
                         except Exception as e:
                             self.logger.error(f"Failed to extract full description: {e}")
+                            job_data['full_description_html'] = f"<p>{job_data.get('summary','')}</p>"
                             job_data['full_description'] = job_data.get('summary', '')
                         
                         # Save to database

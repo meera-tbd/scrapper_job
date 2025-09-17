@@ -44,6 +44,7 @@ from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
+from bs4 import BeautifulSoup
 
 # Setup Django environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -157,6 +158,129 @@ class HealthTimesAustraliaJobScraper:
         except Exception as e:
             self.logger.error(f"Error creating bot user: {e}")
             return None
+
+    # -----------------------------
+    # Helpers: HTML + Skills
+    # -----------------------------
+    def sanitize_description_html(self, html: str) -> str:
+        """Return clean, safe and compact HTML from a raw description block.
+
+        - Strips scripts/styles/forms/nav/header/footer and unrelated sidebars
+        - Preserves p, ul/ol/li, headings, strong/em, br
+        - Removes most attributes except href on anchors
+        """
+        try:
+            if not html:
+                return ""
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Remove unwanted nodes entirely
+            for sel in [
+                "script", "style", "form", "nav", "header", "footer",
+                ".sidebar", ".related", ".share", ".apply", ".application",
+            ]:
+                for n in soup.select(sel):
+                    n.decompose()
+
+            # Allow-list of tags to keep
+            allowed = {"p", "ul", "ol", "li", "strong", "em", "b", "i",
+                       "br", "h1", "h2", "h3", "h4", "h5", "h6", "a"}
+
+            for tag in list(soup.find_all(True)):
+                if tag.name not in allowed:
+                    tag.unwrap()
+                    continue
+                # Strip attributes except href for anchors
+                attrs = dict(tag.attrs)
+                for attr in attrs:
+                    if tag.name == "a" and attr == "href":
+                        continue
+                    del tag.attrs[attr]
+
+            # Collapse excessive whitespace
+            texty = soup.get_text("\n")
+            if texty and not soup.find(True):
+                # If ended up as plain text, wrap to <p>
+                lines = [ln.strip() for ln in texty.splitlines() if ln.strip()]
+                return "\n".join(f"<p>{ln}</p>" for ln in lines)
+
+            html_clean = str(soup)
+            # Remove surrounding html/body if present
+            html_clean = re.sub(r"^\s*<(?:html|body)[^>]*>|</(?:html|body)>\s*$", "", html_clean, flags=re.I)
+            # Remove duplicate blank lines
+            html_clean = re.sub(r"\n{3,}", "\n\n", html_clean)
+            return html_clean.strip()
+        except Exception as e:
+            try:
+                self.logger.warning(f"HTML sanitize failed: {e}")
+            except Exception:
+                pass
+            return html
+
+    def extract_skills_from_text(self, text: str, max_items: int = 18) -> tuple[str, str]:
+        """Extract healthcare-oriented skills from plain text and split across
+        `skills` and `preferred_skills` CSV fields (<=200 chars each).
+        """
+        if not text:
+            return "", ""
+        normalized = re.sub(r"[^a-z0-9\s\+\.#/&-]", " ", text.lower())
+        keywords = [
+            # Core healthcare & compliance
+            "ahpra", "bls", "cpr", "first aid", "manual handling", "infection control",
+            "medication administration", "wound care", "care planning", "clinical assessment",
+            # Nursing
+            "registered nurse", "enrolled nurse", "midwife", "icu", "ed", "theatre", "aged care",
+            # Allied health
+            "physiotherapy", "occupational therapy", "speech pathology", "psychology", "social work",
+            # Systems & tools
+            "emr", "epic", "cerner", "best practice", "ms office", "excel",
+            # Soft skills
+            "communication", "teamwork", "time management", "problem solving", "leadership",
+            # Misc healthcare
+            "mental health", "disability support", "risk assessment", "triage",
+        ]
+        found = []
+        for kw in keywords:
+            pattern = r"\b" + re.escape(kw.replace('.', '\\.')) + r"\b"
+            if re.search(pattern, normalized):
+                found.append(kw)
+        # Deduplicate preserving order
+        seen = set()
+        dedup = []
+        for kw in found:
+            if kw not in seen:
+                seen.add(kw)
+                dedup.append(kw)
+        if not dedup:
+            return "", ""
+        dedup = dedup[:max_items]
+        # Pack into two fields within 200 chars each
+        skills_list: List[str] = []
+        preferred_list: List[str] = []
+        limit = 200
+        for item in dedup:
+            trial = ", ".join(skills_list + [item]).strip(', ')
+            if len(trial) <= limit:
+                skills_list.append(item)
+            else:
+                trial2 = ", ".join(preferred_list + [item]).strip(', ')
+                if len(trial2) <= limit:
+                    preferred_list.append(item)
+        return ", ".join(skills_list), ", ".join(preferred_list)
+
+    def parse_closing_date_text(self, text: str) -> str:
+        """Normalize a closing date string like 12-10-2025 or 12/10/2025.
+        Returns the original if unrecognized; the DB field is free text.
+        """
+        if not text:
+            return ""
+        t = text.strip()
+        # Try multiple formats
+        for fmt in (r"(\d{2})[\-/](\d{2})[\-/](\d{4})", r"(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})"):
+            m = re.search(fmt, t)
+            if m:
+                return m.group(0)
+        return t
 
     def create_browser_context(self):
         """Create a browser context with Australian user agent."""
@@ -460,9 +584,11 @@ class HealthTimesAustraliaJobScraper:
                 'benefits': '',
                 'experience_level': '',
                 'full_description': '',
+                'description_html': '',
                 'location': '',
                 'job_type': '',
-                'salary_text': ''
+                'salary_text': '',
+                'closing_date': ''
             }
             
             # Try to extract full description from HealthTimes job detail page
@@ -482,6 +608,11 @@ class HealthTimesAustraliaJobScraper:
                 if content_element:
                     full_text = content_element.inner_text().strip()
                     details['full_description'] = full_text
+                    try:
+                        raw_html = content_element.inner_html()
+                        details['description_html'] = self.sanitize_description_html(raw_html)
+                    except Exception:
+                        details['description_html'] = ''
                     
                     # Extract specific details from HealthTimes format based on your provided HTML
                     if 'Contact Name:' in full_text:
@@ -543,6 +674,9 @@ class HealthTimesAustraliaJobScraper:
                         elif 'salary' in field_name or 'package' in field_name:
                             details['salary_text'] = field_value
                             self.logger.info(f"Found salary from table: {field_value}")
+                        elif 'closing date' in field_name or 'closing' in field_name:
+                            details['closing_date'] = self.parse_closing_date_text(field_value)
+                            self.logger.info(f"Found closing date from table: {details['closing_date']}")
                         
                         elif 'classification' in field_name and not details['experience_level']:
                             details['experience_level'] = field_value
@@ -558,6 +692,18 @@ class HealthTimesAustraliaJobScraper:
             except Exception as e:
                 self.logger.warning(f"Could not extract table data: {e}")
             
+            # If closing date not found in table, try scanning right-hand meta box if present
+            if not details['closing_date']:
+                try:
+                    right_meta = page.query_selector('.job_advertisement_right')
+                    if right_meta:
+                        meta_text = right_meta.inner_text().strip()
+                        m = re.search(r"closing date[:\s]*([\w\-/\s]+)", meta_text, flags=re.I)
+                        if m:
+                            details['closing_date'] = self.parse_closing_date_text(m.group(1))
+                except Exception:
+                    pass
+
             return details
             
         except Exception as e:
@@ -647,6 +793,14 @@ class HealthTimesAustraliaJobScraper:
                                 scraped_job.requirements = detailed_info['requirements']
                                 scraped_job.benefits = detailed_info['benefits']
                                 scraped_job.experience_level = detailed_info['experience_level']
+
+                                # Derive skills from the detailed plain text
+                                skills_csv, preferred_csv = self.extract_skills_from_text(scraped_job.description)
+                                scraped_job.skills_csv = skills_csv
+                                scraped_job.preferred_csv = preferred_csv
+
+                                # Capture closing date if available
+                                scraped_job.closing_date = detailed_info.get('closing_date', '')
                                 
                                 detail_page.close()
                                 self.logger.info(f"Successfully extracted detailed info for {scraped_job.title}")
@@ -911,6 +1065,20 @@ class HealthTimesAustraliaJobScraper:
                     
                     self.logger.info(f"Job type mapping: '{job.job_type}' -> '{job_type_value}'")
                     
+                    # Ensure both skills fields are populated
+                    skills_csv = getattr(job, 'skills_csv', '') or ''
+                    preferred_csv = getattr(job, 'preferred_csv', '') or ''
+                    if not skills_csv and not preferred_csv:
+                        gen_s, gen_p = self.extract_skills_from_text((job.description or '') + ' ' + (job.title or ''))
+                        skills_csv, preferred_csv = gen_s, gen_p
+                    if skills_csv and not preferred_csv:
+                        preferred_csv = skills_csv
+                    if preferred_csv and not skills_csv:
+                        skills_csv = preferred_csv
+                    # Enforce DB max length (200 each)
+                    skills_csv = (skills_csv or '')[:200]
+                    preferred_csv = (preferred_csv or '')[:200]
+
                     # Create job posting with correct field names
                     job_posting = JobPosting.objects.create(
                         title=job.title,
@@ -919,7 +1087,10 @@ class HealthTimesAustraliaJobScraper:
                         posted_by=self.bot_user,
                         job_type=job_type_value,
                         job_category='healthcare',
-                        description=job.description[:5000] if job.description else "Healthcare position",
+                        # Prefer cleaned HTML if we produced any, else use plain text wrapped
+                        description=(
+                            self.sanitize_description_html(job.description) if job.description else ""
+                        )[:5000] or "<p>Healthcare position</p>",
                         salary_min=salary_min,
                         salary_max=salary_max,
                         salary_currency='AUD',
@@ -931,6 +1102,9 @@ class HealthTimesAustraliaJobScraper:
                         external_source='HealthTimes',
                         posted_ago=job.posted_ago[:50] if job.posted_ago else "",
                         status='active',
+                        job_closing_date=getattr(job, 'closing_date', ''),
+                        skills=skills_csv,
+                        preferred_skills=preferred_csv,
                         additional_info={
                             'requirements': job.requirements,
                             'benefits': job.benefits,

@@ -24,6 +24,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
+from typing import Optional
 
 # Bootstrap Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -143,6 +144,90 @@ class JobAtlasAustraliaScraper:
         return re.sub(r'\s+', ' ', text).strip()
 
     @staticmethod
+    def _sanitize_description_html(html: str) -> str:
+        """Return a safe, compact HTML snippet for job description.
+
+        - Removes script/style/form/nav/header/footer and common sidebars
+        - Keeps basic formatting tags and anchor hrefs
+        """
+        try:
+            from bs4 import BeautifulSoup
+        except Exception:
+            # Fallback: if bs4 not available in this context, store raw html
+            return html or ""
+
+        if not html:
+            return ""
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Remove unwanted nodes entirely
+        for sel in [
+            "script", "style", "form", "nav", "header", "footer",
+            ".sidebar", ".related", ".share", ".apply", ".application",
+        ]:
+            for n in soup.select(sel):
+                n.decompose()
+
+        # Allow only a safe subset of tags
+        allowed = {"p", "ul", "ol", "li", "strong", "em", "b", "i",
+                   "br", "h1", "h2", "h3", "h4", "h5", "h6", "a"}
+
+        for tag in list(soup.find_all(True)):
+            if tag.name not in allowed:
+                tag.unwrap()
+                continue
+            # Strip attributes except href for anchors
+            attrs = dict(tag.attrs)
+            for attr in attrs:
+                if tag.name == "a" and attr == "href":
+                    continue
+                try:
+                    del tag.attrs[attr]
+                except Exception:
+                    pass
+
+        # Remove CTA/navigation anchors like "Apply Now", "Next", "Forward this job" etc.
+        try:
+            cta_patterns = [
+                r"\bapply\b",
+                r"apply now",
+                r"forward this job",
+                r"save job",
+                r"share",
+                r"print",
+                r"next",
+            ]
+            cta_rx = re.compile("|".join(cta_patterns), re.IGNORECASE)
+
+            for a in list(soup.find_all("a")):
+                text = (a.get_text(strip=True) or "")
+                href = a.get("href") or ""
+                if cta_rx.search(text) or re.search(r"/(apply|job/|jobs/)", href, re.IGNORECASE):
+                    parent = a.find_parent(["li", "p"]) or a
+                    try:
+                        parent.decompose()
+                    except Exception:
+                        try:
+                            a.decompose()
+                        except Exception:
+                            pass
+
+            # Remove empty containers left behind
+            for tag_name in ["li", "ul", "ol", "p"]:
+                for node in list(soup.find_all(tag_name)):
+                    if not (node.get_text(strip=True) or node.find(True)):
+                        try:
+                            node.decompose()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        html_clean = str(soup)
+        return html_clean.strip()
+
+    @staticmethod
     def _parse_salary(salary_text: str):
         if not salary_text:
             return None, None, 'AUD', 'yearly'
@@ -245,6 +330,182 @@ class JobAtlasAustraliaScraper:
         if m:
             return m.group(0).strip()
         return ''
+
+    @staticmethod
+    def _extract_skills_from_description(title: str, description_html: str) -> tuple[str, str]:
+        """Extract skills and preferred skills from a job description.
+
+        - Uses headings like "Skills", "Requirements", "Preferred", "Desirable", etc.
+        - Collects bullet points under those sections when present
+        - Falls back to comma/semicolon-separated phrases following trigger words
+        - Final values are comma-separated strings truncated to model limits (200 chars)
+        """
+        if not description_html:
+            return "", ""
+
+        try:
+            from bs4 import BeautifulSoup
+        except Exception:
+            BeautifulSoup = None
+
+        essential_headers = re.compile(
+            r"\b(skills?|requirements?|qualifications?|key selection criteria|about you|what you(?:'|’)ll bring|must have|essential)\b",
+            re.IGNORECASE,
+        )
+        preferred_headers = re.compile(
+            r"\b(preferred|desirable|nice to have|good to have|bonus|ideal|would be a plus|non[-\s]?essential)\b",
+            re.IGNORECASE,
+        )
+
+        def clean_item(text: str) -> str:
+            text = re.sub(r"\s+", " ", text or "").strip(" -•:\u2022\u2013\u2014")
+            # Remove trailing periods
+            text = re.sub(r"\.$", "", text)
+            # Short-circuit if too generic
+            if len(text) < 2:
+                return ""
+            # Avoid non-informative phrases
+            if re.fullmatch(r"(skills|requirements|preferred|desirable|nice to have)", text, flags=re.IGNORECASE):
+                return ""
+            return text
+
+        def join_and_truncate(items: list[str], limit: int = 200) -> str:
+            deduped = []
+            seen = set()
+            for it in items:
+                k = it.lower()
+                if k and k not in seen:
+                    seen.add(k)
+                    deduped.append(it)
+            # Keep most informative first (longer first), but stable for equal lengths
+            deduped.sort(key=lambda s: (-len(s), s))
+            out = []
+            total = 0
+            for it in deduped:
+                sep = ", " if out else ""
+                if total + len(sep) + len(it) > limit:
+                    break
+                out.append(it)
+                total += len(sep) + len(it)
+            return ", ".join(out)
+
+        skills_essential: list[str] = []
+        skills_preferred: list[str] = []
+
+        if BeautifulSoup:
+            try:
+                soup = BeautifulSoup(description_html, "html.parser")
+                # Consider only the main content without scripts/forms etc. The description was
+                # already sanitized, but keep it defensive here.
+                for sel in ["script", "style", "form", "nav", "header", "footer"]:
+                    for n in soup.select(sel):
+                        n.decompose()
+
+                # Strategy 1: heading-led sections → collect following lists/paras
+                headers = soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "strong", "b"]) or []
+                for hdr in headers:
+                    text = (hdr.get_text(" ", strip=True) or "")
+                    if not text:
+                        continue
+                    is_essential = bool(essential_headers.search(text))
+                    is_preferred = bool(preferred_headers.search(text))
+                    if not (is_essential or is_preferred):
+                        continue
+
+                    # Collect up to next 6 siblings or until next header
+                    sib = hdr.next_sibling
+                    collected: list[str] = []
+                    steps = 0
+                    while sib and steps < 12:
+                        steps += 1
+                        name = getattr(sib, "name", "")
+                        if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                            break
+                        # List items
+                        if hasattr(sib, "find_all"):
+                            for li in sib.find_all("li"):
+                                item = clean_item(li.get_text(" ", strip=True))
+                                if item:
+                                    collected.append(item)
+                        # Paragraph fallback extracting comma/semicolon separated phrases
+                        txt = ""
+                        try:
+                            txt = sib.get_text(" ", strip=True) if hasattr(sib, "get_text") else ""
+                        except Exception:
+                            txt = ""
+                        if txt and len(txt) > 20 and re.search(r"[:\-]\s", text):
+                            parts = re.split(r"[,;]\s+", txt)
+                            for p in parts:
+                                item = clean_item(p)
+                                if item:
+                                    collected.append(item)
+                        sib = sib.next_sibling
+
+                    if is_essential and collected:
+                        skills_essential.extend(collected)
+                    if is_preferred and collected:
+                        skills_preferred.extend(collected)
+
+                # Strategy 2: generic bullet lists preceded by trigger words within same parent
+                if not skills_essential:
+                    for ul in soup.find_all(["ul", "ol"]):
+                        heading_text = ""
+                        parent = ul.find_previous(["h2", "h3", "h4", "strong", "b"]) or ul.find_previous("p")
+                        if parent:
+                            heading_text = parent.get_text(" ", strip=True) or ""
+                        target = skills_preferred if preferred_headers.search(heading_text or "") else skills_essential
+                        for li in ul.find_all("li"):
+                            item = clean_item(li.get_text(" ", strip=True))
+                            if item:
+                                target.append(item)
+
+                # Strategy 3: fallback keyword scan on plain text
+                plain_text = soup.get_text(" \n", strip=True)
+            except Exception:
+                plain_text = re.sub(r"<[^>]+>", " ", description_html or "")
+        else:
+            plain_text = re.sub(r"<[^>]+>", " ", description_html or "")
+
+        # Fallback: sentence/phrase patterns on text for both essential and preferred
+        def collect_from_text(text: str) -> tuple[list[str], list[str]]:
+            ess, pref = [], []
+            if not text:
+                return ess, pref
+            # Trigger lines like: Required: A, B, C / Must have: ...
+            patterns = [
+                (re.compile(r"\b(must have|required|requirements|skills? required|essential)\b[:\-]?\s*(.+)", re.IGNORECASE), ess),
+                (re.compile(r"\b(preferred|desirable|nice to have|bonus|good to have|ideal)\b[:\-]?\s*(.+)", re.IGNORECASE), pref),
+            ]
+            for rx, bucket in patterns:
+                for m in rx.finditer(text):
+                    tail = m.group(2)
+                    parts = re.split(r"\s*[\u2022\u2013\u2014\-•]\s*|[,;]\s+|\n+", tail)
+                    for p in parts:
+                        item = clean_item(p)
+                        if item:
+                            bucket.append(item)
+            return ess, pref
+
+        ess2, pref2 = collect_from_text(plain_text)
+        skills_essential.extend(ess2)
+        skills_preferred.extend(pref2)
+
+        # Last resort: Use categorization keywords to pick plausible skill tokens from title/description
+        if not skills_essential:
+            try:
+                from apps.jobs.services import JobCategorizationService
+                kw = JobCategorizationService.get_job_keywords(title or "", plain_text or "")
+                skills_essential.extend(kw[:12])
+            except Exception:
+                pass
+
+        # Normalize: trim, dedupe, and truncate
+        skills_essential = [clean_item(s) for s in skills_essential if clean_item(s)]
+        skills_preferred = [clean_item(s) for s in skills_preferred if clean_item(s)]
+
+        skills_str = join_and_truncate(skills_essential, 200)
+        preferred_str = join_and_truncate(skills_preferred, 200)
+        return skills_str, preferred_str
 
     @staticmethod
     def _sanitize_description(text: str, company_name: str = "") -> str:
@@ -363,7 +624,7 @@ class JobAtlasAustraliaScraper:
             pass
         return clicks
 
-    def _get_or_create_company(self, name: str) -> Company | None:
+    def _get_or_create_company(self, name: str) -> Optional[Company]:
         try:
             if not name:
                 name = 'Unknown Company'
@@ -381,7 +642,7 @@ class JobAtlasAustraliaScraper:
             self.logger.error(f"Company error: {e}")
             return None
 
-    def _get_or_create_location(self, location_name: str) -> Location | None:
+    def _get_or_create_location(self, location_name: str) -> Optional[Location]:
         try:
             if not location_name:
                 return None
@@ -656,6 +917,34 @@ class JobAtlasAustraliaScraper:
             except Exception:
                 pass
 
+            # Try to extract rich HTML description if available
+            try:
+                html_container = None
+                for sel in ['article', 'main', 'section[role="main"]', '#job', '#jobad', '.jobad', '.content', 'div[class*="description"]']:
+                    el = dp.query_selector(sel)
+                    if not el:
+                        continue
+                    # Ensure it has substantial text content
+                    try:
+                        txt_len = len((el.inner_text() or '').strip())
+                    except Exception:
+                        txt_len = 0
+                    if txt_len > 100:
+                        html_container = el
+                        break
+
+                if html_container:
+                    try:
+                        raw_html = html_container.inner_html()
+                        sanitized = self._sanitize_description_html(raw_html)
+                        # Only override if sanitized HTML still has substance
+                        if sanitized and len(re.sub(r'<[^>]+>', ' ', sanitized).strip()) > 80:
+                            details["description"] = sanitized
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             # Clean empty values
             return {k: v for k, v in details.items() if v}
         except Exception as e:
@@ -688,6 +977,31 @@ class JobAtlasAustraliaScraper:
                     unique_slug = f"{base_slug}-{company_part}-{counter}"
                     counter += 1
 
+                # Derive skills and preferred skills from description if not provided
+                provided_skills = (job.get('skills') or '').strip()
+                provided_pref = (job.get('preferred_skills') or '').strip()
+                if not provided_skills or not provided_pref:
+                    try:
+                        desc_html = job.get('description', '') or job.get('summary', '')
+                        skills_str, preferred_str = self._extract_skills_from_description(job.get('title', ''), desc_html)
+                        if not provided_skills:
+                            provided_skills = skills_str
+                        if not provided_pref:
+                            provided_pref = preferred_str
+                    except Exception:
+                        pass
+
+                # Ensure both fields are always populated
+                if provided_skills and not provided_pref:
+                    provided_pref = provided_skills
+                if provided_pref and not provided_skills:
+                    provided_skills = provided_pref
+                if not provided_skills and not provided_pref:
+                    # Fall back to tags or title keywords
+                    fallback = tags or (job.get('title', '') or '')
+                    provided_skills = fallback
+                    provided_pref = fallback
+
                 JobPosting.objects.create(
                     title=job.get('title', '')[:200],
                     slug=unique_slug,
@@ -708,7 +1022,9 @@ class JobAtlasAustraliaScraper:
                     posted_ago=job.get('posted_date', '')[:50],
                     status='active',
                     tags=tags,
-                    additional_info={'scraper_version': 'Playwright-JobAtlas-1.0'}
+                    additional_info={'scraper_version': 'Playwright-JobAtlas-1.0'},
+                    skills=(provided_skills or '')[:200],
+                    preferred_skills=(provided_pref or '')[:200]
                 )
 
                 self.jobs_saved += 1

@@ -38,10 +38,12 @@ import time
 import random
 import logging
 import re
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
+import requests
 
 # Setup Django environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -325,6 +327,7 @@ class ArtsHubAustraliaJobScraper:
             # Extract company/organization from image alt or data attributes
             # Note: Company info might be in the image or need to be extracted from job detail page
             company = "ArtsHub"  # Default, will be updated from job detail page
+            company_logo_url = ""
             
             # Extract location from h4.card-sub-heading
             job_location = self.extract_text_by_selectors(job_element, [
@@ -369,6 +372,23 @@ class ArtsHubAustraliaJobScraper:
             
             # Basic description will be from art form and skills
             basic_description = f"{art_form}. {skills}".strip() if art_form or skills else ""
+
+            # Try to extract company logo URL from the card (if present)
+            try:
+                img_candidates = job_element.query_selector_all("img") or []
+                for img in img_candidates:
+                    src = img.get_attribute("src") or ""
+                    if not src:
+                        continue
+                    # Skip data URIs and tiny placeholders
+                    if src.startswith("data:"):
+                        continue
+                    if not src.startswith("http"):
+                        src = urljoin(self.base_url, src)
+                    company_logo_url = src
+                    break
+            except Exception:
+                company_logo_url = ""
             
             # Skip if missing essential data
             if not title:
@@ -387,12 +407,19 @@ class ArtsHubAustraliaJobScraper:
             
             # Try to get full description from job detail page if URL is available
             description = ""
+            description_html = ""
+            posted_date_text = ""
+            closing_date_detail = ""
             if url and url.strip():
                 self.logger.info(f"🌐 Visiting job detail page: {url}")
                 try:
-                    description, detail_company = self.extract_full_job_details(url)
-                    if description:
-                        self.logger.info(f"📄 Extracted full description ({len(description)} chars) for: {title}")
+                    desc_html, desc_text, detail_company, posted_txt, closing_txt = self.extract_full_job_details(url)
+                    description_html = (desc_html or "").strip()
+                    description = (desc_text or "").strip()
+                    posted_date_text = (posted_txt or "").strip()
+                    closing_date_detail = (closing_txt or "").strip()
+                    if description_html or description:
+                        self.logger.info(f"📄 Extracted full description for: {title}")
                     else:
                         self.logger.warning(f"❌ No description found on detail page for: {title}")
                     
@@ -432,11 +459,14 @@ class ArtsHubAustraliaJobScraper:
                 'company_name': company,
                 'location': job_location,
                 'description': description,
+                'company_logo': company_logo_url,
+                'description_html': description_html,
+                'posted_date_text': posted_date_text,
                 'external_url': url,
                 'salary_text': salary,
                 'job_type': detected_job_type,
                 'art_form': art_form,
-                'closing_date': closing_date,
+                'closing_date': closing_date_detail or closing_date,
                 'skills': skills,
                 'job_type_badge': job_type_badge,
                 'external_source': 'artshub.com.au',
@@ -448,9 +478,12 @@ class ArtsHubAustraliaJobScraper:
             return None
     
     def extract_full_job_details(self, job_url):
-        """Extract full job description and company info by visiting the individual job page."""
+        """Extract full job description (HTML + text), company and date metadata.
+
+        Returns: (description_html, description_text, company_name, posted_date_text, closing_date_text)
+        """
         if not job_url:
-            return "", "ArtsHub"
+            return "", "", "ArtsHub", "", ""
         
         try:
             self.logger.info(f"📖 Loading job detail page: {job_url}")
@@ -467,6 +500,7 @@ class ArtsHubAustraliaJobScraper:
                 
                 # Extract description from ArtsHub's specific structure
                 full_description = ""
+                full_description_html = ""
                 
                 try:
                     # First try to get the main content div with class "the-content"
@@ -518,6 +552,42 @@ class ArtsHubAustraliaJobScraper:
                         except:
                             continue
                 
+                # If we still need HTML, parse the page and extract container HTML
+                try:
+                    page_html = detail_page.content()
+                    soup = BeautifulSoup(page_html, 'html.parser')
+                    container = (
+                        soup.select_one('.the-content') or
+                        soup.select_one('.job-description') or
+                        soup.select_one('.description') or
+                        soup.select_one('main .content') or
+                        soup.select_one('article .content') or
+                        soup.select_one('.main-content') or
+                        soup.body
+                    )
+                    # Remove apply buttons/controls
+                    for el in container.select('a[href*="/apply/"], .button, [class*="button"]'):
+                        try:
+                            el.decompose()
+                        except Exception:
+                            pass
+                    # Fix relative links/images
+                    for a in container.select('a[href]'):
+                        try:
+                            a['href'] = urljoin(self.base_url, a['href'])
+                        except Exception:
+                            pass
+                    for img in container.select('img[src]'):
+                        try:
+                            img['src'] = urljoin(self.base_url, img['src'])
+                        except Exception:
+                            pass
+                    full_description_html = (container.decode_contents() or '').strip()
+                    if not full_description:
+                        full_description = self.clean_description_text(container.get_text(' ', strip=True))
+                except Exception:
+                    pass
+
                 # Try to extract company information from the job detail page
                 company_name = "ArtsHub"
                 company_selectors = [
@@ -542,8 +612,28 @@ class ArtsHubAustraliaJobScraper:
                     except:
                         continue
                 
-                # Return full description without any truncation
-                result = full_description, company_name
+                # Extract dates (Listed / Closing Date) from page text
+                page_text = ""
+                try:
+                    page_text = detail_page.content()
+                except Exception:
+                    page_text = ""
+
+                posted_txt = ""
+                closing_txt = ""
+                try:
+                    text_only = BeautifulSoup(page_text or "", 'html.parser').get_text(" ", strip=True)
+                    m1 = re.search(r'listed\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})', text_only, re.IGNORECASE)
+                    if m1:
+                        posted_txt = m1.group(1)
+                    m2 = re.search(r'closing\s*(?:date)?\s*[:\-]?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})', text_only, re.IGNORECASE)
+                    if m2:
+                        closing_txt = m2.group(1)
+                except Exception:
+                    pass
+
+                # Return structured data
+                result = full_description_html, full_description or "", company_name, posted_txt, closing_txt
                 
             finally:
                 # Always close the detail page to free resources
@@ -556,7 +646,7 @@ class ArtsHubAustraliaJobScraper:
             
         except Exception as e:
             self.logger.error(f"Error extracting full job details from {job_url}: {e}")
-            return "", "ArtsHub"
+            return "", "", "ArtsHub", "", ""
     
     def clean_description_text(self, text):
         """Clean and format job description text."""
@@ -604,6 +694,74 @@ class ArtsHubAustraliaJobScraper:
         text = re.sub(r'\s+', ' ', text.strip())
         
         return text.strip()
+
+    def parse_absolute_date(self, text_value):
+        """Parse absolute dates like 'Sep 12, 2025' or '12 Oct 2025'."""
+        if not text_value:
+            return None
+        value = text_value.strip()
+        fmts = [
+            '%b %d, %Y', '%B %d, %Y',
+            '%d %b %Y', '%d %B %Y',
+            '%b %d %Y', '%B %d %Y'
+        ]
+        for fmt in fmts:
+            try:
+                return datetime.strptime(value, fmt)
+            except Exception:
+                continue
+        try:
+            cleaned = re.sub(r',', '', value)
+            for fmt in ['%d %b %Y', '%d %B %Y', '%b %d %Y', '%B %d %Y']:
+                try:
+                    return datetime.strptime(cleaned, fmt)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def extract_skills_from_text(self, text, max_items=12):
+        """Generate skills and preferred skills from description text.
+        Returns tuple (skills_csv, preferred_csv).
+        """
+        if not text:
+            return "", ""
+        normalized = re.sub(r"[^a-z0-9\s\+\.#/&-]", " ", text.lower())
+        skill_keywords = [
+            'communication', 'stakeholder management', 'leadership', 'problem solving', 'teamwork', 'planning',
+            'budgeting', 'project management', 'agile', 'scrum', 'customer service', 'marketing', 'sales',
+            'curation', 'exhibition', 'gallery', 'museum', 'fundraising', 'grant writing', 'event management',
+            'creative direction', 'content creation', 'social media', 'adobe photoshop', 'adobe illustrator',
+            'indesign', 'photoshop', 'illustrator', 'editing', 'copywriting', 'graphic design', 'video editing',
+            'excel', 'power bi', 'sql', 'jira', 'confluence', 'sharepoint', 'wordpress'
+        ]
+        found = []
+        for kw in skill_keywords:
+            pattern = r"\b" + re.escape(kw.replace('.', '\\.')) + r"\b"
+            if re.search(pattern, normalized):
+                found.append(kw)
+        dedup = []
+        seen = set()
+        for kw in found:
+            if kw not in seen:
+                seen.add(kw)
+                dedup.append(kw)
+        if not dedup:
+            return "", ""
+        dedup = dedup[:max_items]
+        skills_list = []
+        preferred_list = []
+        char_limit = 200
+        for item in dedup:
+            csv_try = (", ".join(skills_list + [item])).strip(', ')
+            if len(csv_try) <= char_limit:
+                skills_list.append(item)
+            else:
+                csv_try2 = (", ".join(preferred_list + [item])).strip(', ')
+                if len(csv_try2) <= char_limit:
+                    preferred_list.append(item)
+        return ", ".join(skills_list), ", ".join(preferred_list)
     
     def map_job_type_from_badge(self, job_type_badge):
         """Map ArtsHub job type badge to our job type choices."""
@@ -800,10 +958,134 @@ class ArtsHubAustraliaJobScraper:
                     'company_size': 'medium'
                 }
             )
+            # Enrich ArtsHub company with website, logo and address if missing
+            if company.name == 'ArtsHub':
+                self.update_artshub_company_info(company)
             return company
         except Exception as e:
             self.logger.error(f"Error creating company {company_name}: {e}")
             return None
+
+    def update_artshub_company_info(self, company):
+        """Fetch and store ArtsHub website, logo, and office address.
+
+        Safe no-op if network fails; updates only missing fields.
+        """
+        try:
+            updated = False
+            # Always set website to canonical
+            if not company.website:
+                company.website = 'https://www.artshub.com.au/'
+                updated = True
+            # Set details_url to contact page
+            if not company.details_url:
+                company.details_url = 'https://www.artshub.com.au/contact-us/'
+                updated = True
+            # First: fetch homepage to capture site header logo
+            homepage_logo = ''
+            try:
+                resp_home = requests.get('https://www.artshub.com.au/', timeout=15)
+                if resp_home.ok:
+                    soup_home = BeautifulSoup(resp_home.text, 'html.parser')
+                    # Try common header logo patterns first
+                    img = (
+                        soup_home.select_one('a.custom-logo-link img') or
+                        soup_home.select_one('img.custom-logo') or
+                        soup_home.select_one('header .site-logo img') or
+                        soup_home.select_one('img[alt*="arts hub" i]') or
+                        soup_home.select_one('img[alt*="artshub" i]') or
+                        soup_home.select_one('img[src*="/uploads/"][src*="logo" i]') or
+                        soup_home.select_one('img[src*="logo" i]')
+                    )
+                    src = ''
+                    if img:
+                        src = img.get('src') or ''
+                        if not src and img.get('srcset'):
+                            # pick first candidate
+                            src = (img.get('srcset').split(',')[0] or '').strip().split(' ')[0]
+                    if not src:
+                        # Try icons / social image as a fallback
+                        link_icon = soup_home.select_one('link[rel*="icon" i]')
+                        if link_icon and link_icon.get('href'):
+                            src = link_icon.get('href')
+                    if not src:
+                        meta_og = soup_home.select_one('meta[property="og:image"][content]')
+                        if meta_og:
+                            src = meta_og.get('content')
+                    if src:
+                        if not src.startswith('http'):
+                            src = urljoin('https://www.artshub.com.au', src)
+                        homepage_logo = src
+            except Exception:
+                homepage_logo = ''
+            if homepage_logo:
+                # Always ensure the canonical logo is set for ArtsHub
+                if not company.logo or company.logo.strip() != homepage_logo:
+                    company.logo = homepage_logo
+                    updated = True
+
+            # Fetch contact page to parse address (fallback logo if not found)
+            resp = requests.get('https://www.artshub.com.au/contact-us/', timeout=15)
+            if resp.ok:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                # Address: look for heading text 'Office Address' and take following text block
+                address_text = ''
+                try:
+                    # Find the element containing the phrase
+                    el = None
+                    for cand in soup.find_all(text=re.compile(r'Office Address', re.I)):
+                        el = cand.parent
+                        break
+                    if el:
+                        # Gather next few text nodes
+                        buf = []
+                        node = el.find_next()
+                        steps = 0
+                        while node and steps < 8:
+                            txt = node.get_text(" ", strip=True) if hasattr(node, 'get_text') else str(node).strip()
+                            if txt:
+                                buf.append(txt)
+                            node = node.find_next_sibling() or node.find_next()
+                            steps += 1
+                        address_text = ' '.join(buf)
+                except Exception:
+                    address_text = ''
+                if address_text and not company.address_line1:
+                    company.address_line1 = address_text[:100]
+                    # Best-effort: set city/state via regex
+                    try:
+                        m = re.search(r'(Melbourne|Sydney|Brisbane|Perth|Adelaide|Hobart|Canberra|Darwin)', address_text, re.I)
+                        if m:
+                            company.city = m.group(1)
+                        m2 = re.search(r'\b(NSW|VIC|QLD|WA|SA|TAS|ACT|NT)\b', address_text)
+                        if m2:
+                            company.state = m2.group(1)
+                        m3 = re.search(r'\b(\d{4})\b', address_text)
+                            
+                        if m3:
+                            company.postcode = m3.group(1)
+                    except Exception:
+                        pass
+                    updated = True
+                # Fallback: try to capture a logo from this page if homepage failed
+                if not company.logo:
+                    logo = ''
+                    try:
+                        img = soup.select_one('img[src*="logo"], header img, .site-logo img')
+                        if img and img.get('src'):
+                            logo = urljoin('https://www.artshub.com.au', img['src'])
+                    except Exception:
+                        logo = ''
+                    if logo:
+                        company.logo = logo
+                        updated = True
+            if updated:
+                company.save()
+        except Exception as e:
+            try:
+                self.logger.debug(f"Could not update ArtsHub company info: {e}")
+            except Exception:
+                pass
     
     def get_or_create_location(self, location_name):
         """Get or create location object for Australia."""
@@ -858,6 +1140,16 @@ class ArtsHubAustraliaJobScraper:
                 if not company:
                     self.logger.error(f"Failed to create company: {job_data['company_name']}")
                     return False
+                # Update company logo if provided and missing or different
+                try:
+                    logo_url = (job_data.get('company_logo') or '').strip()
+                    # Only update from card image for non-ArtsHub companies
+                    if logo_url and company.name != 'ArtsHub':
+                        if not company.logo or company.logo.strip() != logo_url:
+                            company.logo = logo_url
+                            company.save()
+                except Exception:
+                    pass
                 
                 # Get or create location
                 location = self.get_or_create_location(job_data['location'])
@@ -866,7 +1158,12 @@ class ArtsHubAustraliaJobScraper:
                 salary_min, salary_max, salary_currency, salary_type = self.parse_salary(job_data.get('salary_text', ''))
                 
                 # Parse date
-                date_posted = self.parse_date(job_data.get('date_posted_text', ''))
+                date_posted = None
+                # Prefer absolute date from detail page
+                if job_data.get('posted_date_text'):
+                    date_posted = self.parse_absolute_date(job_data.get('posted_date_text'))
+                if not date_posted:
+                    date_posted = self.parse_date(job_data.get('date_posted_text', ''))
                 
                 # Categorize job using your existing service (arts jobs will likely be 'other' but could be marketing, education, etc.)
                 job_category = JobCategorizationService.categorize_job(
@@ -904,11 +1201,53 @@ class ArtsHubAustraliaJobScraper:
                     timestamp = int(datetime.now().timestamp())
                     external_url = f"https://artshub.com.au/job/{unique_slug}-{timestamp}/"
                 
+                # Extract skills from description for new fields (use card skills as fallback input)
+                text_for_skills = (job_data.get('description', '') or '') + ' ' + (job_data.get('skills', '') or '')
+                skills_csv, preferred_csv = self.extract_skills_from_text(text_for_skills)
+                # If extractor found nothing, fall back to our computed tags list and art form
+                if not skills_csv and not preferred_csv:
+                    candidate_list = []
+                    try:
+                        candidate_list = [t for t in tags_list if t]
+                    except Exception:
+                        candidate_list = []
+                    # Include art form and classification hints
+                    for extra in [job_data.get('art_form'), job_data.get('job_type_badge'), job_category]:
+                        if extra and isinstance(extra, str):
+                            candidate_list.append(extra.strip())
+                    # Deduplicate while preserving order
+                    seen = set()
+                    ordered = []
+                    for it in candidate_list:
+                        low = it.lower()
+                        if low and low not in seen:
+                            seen.add(low)
+                            ordered.append(it)
+                    # Pack into two CSVs within 200 chars each
+                    s_list, p_list = [], []
+                    limit = 200
+                    for item in ordered:
+                        try_item = (', '.join(s_list + [item])).strip(', ')
+                        if len(try_item) <= limit:
+                            s_list.append(item)
+                        else:
+                            try_item2 = (', '.join(p_list + [item])).strip(', ')
+                            if len(try_item2) <= limit:
+                                p_list.append(item)
+                    skills_csv = ', '.join(s_list)
+                    preferred_csv = ', '.join(p_list)
+                # Absolute fallback: ensure both fields are non-empty
+                if not skills_csv and not preferred_csv:
+                    base = job_data.get('art_form') or job_category or 'general'
+                    base = str(base)[:200]
+                    skills_csv = base
+                    preferred_csv = base
+
                 # Create job posting
                 job_posting = JobPosting.objects.create(
                     title=job_data['title'],
                     slug=unique_slug,
-                    description=job_data.get('description', ''),
+                    description=job_data.get('description_html') or job_data.get('description', ''),
                     company=company,
                     location=location,
                     posted_by=self.bot_user,
@@ -924,6 +1263,9 @@ class ArtsHubAustraliaJobScraper:
                     status='active',
                     date_posted=date_posted,
                     posted_ago=job_data.get('date_posted_text', ''),
+                    job_closing_date=job_data.get('closing_date') or job_data.get('closing_date_text', ''),
+                    skills=skills_csv or preferred_csv,
+                    preferred_skills=preferred_csv or skills_csv,
                     tags=tags_str,
                     additional_info={
                         'scraper_version': 'ArtsHub-Playwright-Australia-1.0',
