@@ -31,6 +31,7 @@ from urllib.parse import urljoin, urlparse
 import logging
 from decimal import Decimal
 import concurrent.futures
+from bs4 import BeautifulSoup
 
 # Set up Django environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -116,6 +117,113 @@ class ProfessionalSeekScraper:
         delay = random.uniform(min_seconds, max_seconds)
         logger.debug(f"Waiting {delay:.2f} seconds...")
         time.sleep(delay)
+    
+    def extract_skills_from_description(self, description_html):
+        """Extract skills from job description using keyword matching."""
+        if not description_html:
+            return [], []
+        
+        # Convert HTML to text for skill extraction while preserving formatting
+        soup = BeautifulSoup(description_html, 'html.parser')
+        text = soup.get_text().lower()
+        
+        # Common Australian job skills database
+        technical_skills = [
+            # Programming Languages
+            'python', 'java', 'javascript', 'c#', 'c++', 'php', 'ruby', 'go', 'rust', 'scala',
+            'typescript', 'kotlin', 'swift', 'r', 'matlab', 'sql', 'html', 'css', 'xml', 'json',
+            
+            # Frameworks & Libraries
+            'react', 'angular', 'vue', 'django', 'flask', 'spring', 'laravel', 'rails', 'express',
+            'node.js', 'jquery', 'bootstrap', 'tensorflow', 'pytorch', 'pandas', 'numpy',
+            
+            # Databases
+            'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sql server', 'sqlite', 'cassandra',
+            'elasticsearch', 'dynamodb', 'firestore',
+            
+            # Cloud & DevOps
+            'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'gitlab', 'github actions',
+            'terraform', 'ansible', 'chef', 'puppet', 'vagrant', 'ci/cd', 'devops',
+            
+            # Design & Creative
+            'photoshop', 'illustrator', 'figma', 'sketch', 'indesign', 'after effects', 'premiere',
+            'ui/ux', 'graphic design', 'web design', 'branding', 'typography',
+            
+            # Business & Analytics
+            'excel', 'power bi', 'tableau', 'salesforce', 'sap', 'oracle', 'dynamics 365',
+            'google analytics', 'data analysis', 'business intelligence', 'erp', 'crm',
+            
+            # Project Management
+            'agile', 'scrum', 'kanban', 'jira', 'confluence', 'trello', 'asana', 'monday.com',
+            'project management', 'pmp', 'prince2', 'safe',
+            
+            # Marketing & Sales
+            'digital marketing', 'seo', 'sem', 'social media', 'content marketing', 'email marketing',
+            'google ads', 'facebook ads', 'hubspot', 'mailchimp', 'hootsuite',
+            
+            # Finance & Accounting
+            'quickbooks', 'xero', 'myob', 'financial analysis', 'budgeting', 'forecasting',
+            'financial reporting', 'tax preparation', 'audit', 'compliance',
+            
+            # Healthcare
+            'patient care', 'medical records', 'clinical research', 'nursing', 'pharmacy',
+            'medical terminology', 'hipaa', 'healthcare management',
+            
+            # Education
+            'curriculum development', 'lesson planning', 'classroom management', 'assessment',
+            'online learning', 'lms', 'educational technology',
+            
+            # General Skills
+            'communication', 'teamwork', 'leadership', 'problem solving', 'critical thinking',
+            'time management', 'organization', 'attention to detail', 'customer service',
+            'multitasking', 'adaptability', 'creativity', 'collaboration'
+        ]
+        
+        # Soft skills and preferred qualifications
+        preferred_qualifications = [
+            # Experience levels
+            'entry level', 'junior', 'senior', 'lead', 'principal', 'architect', 'manager',
+            'director', 'executive', 'graduate', 'intern',
+            
+            # Education
+            'bachelor', 'master', 'phd', 'diploma', 'certificate', 'degree', 'qualification',
+            'university', 'tafe', 'college', 'education',
+            
+            # Certifications
+            'certified', 'certification', 'accredited', 'licensed', 'professional',
+            'chartered', 'fellow', 'associate',
+            
+            # Industry specific
+            'government', 'healthcare', 'finance', 'education', 'retail', 'hospitality',
+            'construction', 'manufacturing', 'mining', 'agriculture', 'transport',
+            
+            # Work arrangements
+            'remote', 'hybrid', 'flexible', 'part-time', 'full-time', 'contract',
+            'permanent', 'temporary', 'casual', 'shift work',
+            
+            # Australian specific
+            'working with children check', 'police check', 'security clearance',
+            'australian citizen', 'permanent resident', 'work rights', 'visa',
+            'drivers licence', 'first aid', 'rsa', 'rcg'
+        ]
+        
+        # Extract skills found in the description
+        found_skills = []
+        found_preferred = []
+        
+        for skill in technical_skills:
+            if skill in text:
+                found_skills.append(skill.title())
+        
+        for pref in preferred_qualifications:
+            if pref in text:
+                found_preferred.append(pref.title())
+        
+        # Remove duplicates and limit to reasonable numbers
+        found_skills = list(set(found_skills))[:10]  # Max 10 skills
+        found_preferred = list(set(found_preferred))[:8]  # Max 8 preferred
+        
+        return found_skills, found_preferred
     
     def parse_date(self, date_string):
         """Parse relative date strings into datetime objects."""
@@ -340,12 +448,11 @@ class ProfessionalSeekScraper:
                 job_data['keywords'] = []
             
             # Attempt to fetch the FULL job description from the job detail page
-            # without navigating away or opening new tabs. We use a same-origin
-            # fetch from within the page context and parse the HTML with DOMParser.
+            # Preserve HTML format and extract company logo
             try:
                 job_url_for_description = job_data.get('job_url', '')
                 if job_url_for_description:
-                    description_text = page.evaluate(
+                    description_data = page.evaluate(
                         """
                         async (url) => {
                             try {
@@ -353,6 +460,8 @@ class ProfessionalSeekScraper:
                                 const html = await response.text();
                                 const parser = new DOMParser();
                                 const doc = parser.parseFromString(html, 'text/html');
+                                
+                                // Extract description with HTML format preserved
                                 const selectors = [
                                     '[data-automation="jobDescription"]',
                                     '[data-automation="jobAdDetails"]',
@@ -361,23 +470,77 @@ class ProfessionalSeekScraper:
                                     'div[data-automation="jobDetails"]',
                                     'section[data-automation="job-detail"]'
                                 ];
+                                
+                                let description_html = '';
                                 for (const sel of selectors) {
                                     const el = doc.querySelector(sel);
-                                    if (el && el.innerText && el.innerText.trim().length > 0) {
-                                        return el.innerText.trim();
+                                    if (el && el.innerHTML && el.innerHTML.trim().length > 0) {
+                                        description_html = el.innerHTML.trim();
+                                        break;
                                     }
                                 }
-                                const main = doc.querySelector('main') || doc.body;
-                                return (main && main.innerText) ? main.innerText.trim() : '';
+                                
+                                // Extract company logo
+                                let company_logo = '';
+                                const logoSelectors = [
+                                    '[data-automation="jobHeaderCompanyImage"] img',
+                                    '[data-automation="jobHeaderCompanyLogo"] img',
+                                    '[data-automation="companyLogo"] img',
+                                    '[data-automation="jobCompanyLogo"] img',
+                                    '.jobHeader img',
+                                    '.companyLogo img',
+                                    'img[alt*="logo"]',
+                                    'img[alt*="Logo"]',
+                                    'img[class*="logo"]',
+                                    'img[class*="Logo"]',
+                                    '[data-automation="jobHeaderContainer"] img',
+                                    'header img',
+                                    '.company-logo img',
+                                    '.logo img'
+                                ];
+                                
+                                for (const logoSel of logoSelectors) {
+                                    const logoEl = doc.querySelector(logoSel);
+                                    if (logoEl && logoEl.src && logoEl.src.includes('image-service-cdn.seek.com.au')) {
+                                        company_logo = logoEl.src;
+                                        break;
+                                    }
+                                }
+                                
+                                // If no logo found with specific CDN, try any logo
+                                if (!company_logo) {
+                                    for (const logoSel of logoSelectors) {
+                                        const logoEl = doc.querySelector(logoSel);
+                                        if (logoEl && logoEl.src && logoEl.src.startsWith('http')) {
+                                            company_logo = logoEl.src;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                return {
+                                    description_html: description_html,
+                                    company_logo: company_logo
+                                };
                             } catch (_) {
-                                return '';
+                                return {
+                                    description_html: '',
+                                    company_logo: ''
+                                };
                             }
                         }
                         """,
                         job_url_for_description
                     )
-                    if description_text and len(description_text) > len(job_data.get('summary', '') or ''):
-                        job_data['summary'] = description_text
+                    
+                    if description_data and description_data.get('description_html'):
+                        if len(description_data['description_html']) > len(job_data.get('summary', '') or ''):
+                            job_data['summary'] = description_data['description_html']
+                    
+                    # Store company logo URL
+                    if description_data and description_data.get('company_logo'):
+                        job_data['company_logo'] = description_data['company_logo']
+                        
             except:
                 # If anything goes wrong, keep the short summary already captured
                 pass
@@ -429,9 +592,10 @@ class ProfessionalSeekScraper:
                         }
                     )
                 
-                # Get or create company
+                # Get or create company with logo update
                 company_name = job_data.get('company_name', 'Unknown Company')
                 company_slug = slugify(company_name)
+                company_logo = job_data.get('company_logo', '')
                 
                 company_obj, created = Company.objects.get_or_create(
                     slug=company_slug,
@@ -439,9 +603,15 @@ class ProfessionalSeekScraper:
                         'name': company_name,
                         'description': f'{company_name} - Jobs from Seek.com.au',
                         'website': '',
-                        'company_size': 'medium'  # Default assumption
+                        'company_size': 'medium',  # Default assumption
+                        'logo': company_logo
                     }
                 )
+                
+                # Update logo if we found one and it's not already set
+                if company_logo and not company_obj.logo:
+                    company_obj.logo = company_logo
+                    company_obj.save()
                 
                 # Parse salary
                 salary_min, salary_max, currency, salary_type, raw_text = self.parse_salary(
@@ -477,6 +647,14 @@ class ProfessionalSeekScraper:
                 # Combine badges and keywords as tags
                 all_tags = list(set(badges))  # Remove duplicates
                 tags_string = ', '.join(all_tags)
+                
+                # Extract skills and preferred skills from description
+                job_description = job_data.get('summary', '')
+                skills_list, preferred_skills_list = self.extract_skills_from_description(job_description)
+                
+                # Convert lists to comma-separated strings
+                skills_string = ', '.join(skills_list) if skills_list else ''
+                preferred_skills_string = ', '.join(preferred_skills_list) if preferred_skills_list else ''
                 
                 # Automatic job categorization
                 job_category = JobCategorizationService.categorize_job(
@@ -515,6 +693,8 @@ class ProfessionalSeekScraper:
                     posted_ago=job_data.get('posted_ago', ''),
                     date_posted=date_posted,
                     tags=tags_string,
+                    skills=skills_string,  # Add extracted skills
+                    preferred_skills=preferred_skills_string,  # Add extracted preferred skills
                     additional_info=job_data  # Store all extracted data
                 )
                 
@@ -522,6 +702,10 @@ class ProfessionalSeekScraper:
                 logger.info(f"  Category: {job_posting.job_category}")
                 logger.info(f"  Location: {job_posting.location.name if job_posting.location else 'Not specified'}")
                 logger.info(f"  Salary: {job_posting.salary_display}")
+                logger.info(f"  Skills: {skills_string[:100]}{'...' if len(skills_string) > 100 else ''}")
+                logger.info(f"  Preferred Skills: {preferred_skills_string[:100]}{'...' if len(preferred_skills_string) > 100 else ''}")
+                if company_logo:
+                    logger.info(f"  Company Logo: {company_logo}")
                 
                 self.scraped_count += 1
                 return True

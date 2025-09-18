@@ -30,6 +30,8 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import logging
 from decimal import Decimal
 import threading
+import requests
+from bs4 import BeautifulSoup
 
 # Set up Django environment BEFORE any Django imports
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -138,6 +140,196 @@ class TheCreativeStoreScraper:
         
         return None, None, 'yearly', salary_text
     
+    def extract_skills_from_description(self, description):
+        """Extract skills and preferred skills from job description."""
+        if not description:
+            return [], []
+        
+        # Common technical skills keywords
+        technical_skills = [
+            # Programming Languages
+            'python', 'javascript', 'java', 'c#', 'php', 'ruby', 'swift', 'kotlin', 'go', 'rust',
+            'html', 'css', 'sass', 'less', 'typescript', 'sql', 'nosql', 'mongodb', 'postgresql',
+            
+            # Frameworks & Libraries
+            'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'laravel',
+            'spring', 'bootstrap', 'jquery', 'redux', 'graphql', 'rest api', 'api',
+            
+            # Creative/Design Skills
+            'photoshop', 'illustrator', 'indesign', 'sketch', 'figma', 'adobe creative suite',
+            'after effects', 'premiere pro', 'cinema 4d', '3ds max', 'maya', 'blender',
+            'ui/ux', 'user experience', 'user interface', 'graphic design', 'web design',
+            'brand design', 'print design', 'digital design', 'motion graphics', 'animation',
+            'typography', 'layout design', 'concept development', 'creative direction',
+            
+            # Marketing & Content
+            'content marketing', 'social media', 'seo', 'sem', 'google ads', 'facebook ads',
+            'email marketing', 'copywriting', 'content creation', 'brand strategy', 'campaign management',
+            'analytics', 'google analytics', 'digital marketing', 'marketing automation',
+            
+            # Tools & Platforms
+            'git', 'github', 'docker', 'kubernetes', 'aws', 'azure', 'google cloud',
+            'jenkins', 'jira', 'confluence', 'slack', 'trello', 'asana', 'monday.com',
+            'salesforce', 'hubspot', 'mailchimp', 'wordpress', 'shopify', 'woocommerce',
+            
+            # General Skills
+            'project management', 'agile', 'scrum', 'kanban', 'team leadership', 'communication',
+            'problem solving', 'analytical thinking', 'time management', 'collaboration',
+            'client management', 'presentation skills', 'research', 'data analysis'
+        ]
+        
+        # Convert description to lowercase for searching
+        desc_lower = description.lower()
+        
+        # Find skills mentioned in description
+        found_skills = []
+        for skill in technical_skills:
+            # Look for whole word matches
+            if re.search(r'\b' + re.escape(skill.lower()) + r'\b', desc_lower):
+                found_skills.append(skill.title())
+        
+        # Remove duplicates while preserving order
+        found_skills = list(dict.fromkeys(found_skills))
+        
+        # Split into required and preferred based on context
+        required_skills = []
+        preferred_skills = []
+        
+        # Look for sections that indicate requirements vs preferences
+        required_indicators = ['required', 'must have', 'essential', 'mandatory', 'need to have']
+        preferred_indicators = ['preferred', 'desirable', 'nice to have', 'bonus', 'advantage', 'plus']
+        
+        # Split description into sentences/sections
+        sentences = re.split(r'[.\n]', description)
+        
+        for skill in found_skills:
+            skill_lower = skill.lower()
+            is_required = False
+            is_preferred = False
+            
+            # Check context around the skill
+            for sentence in sentences:
+                if skill_lower in sentence.lower():
+                    sentence_lower = sentence.lower()
+                    
+                    # Check if it's in a required context
+                    if any(indicator in sentence_lower for indicator in required_indicators):
+                        is_required = True
+                        break
+                    # Check if it's in a preferred context
+                    elif any(indicator in sentence_lower for indicator in preferred_indicators):
+                        is_preferred = True
+            
+            # Default to required if not specifically marked as preferred
+            if is_required or (not is_preferred):
+                required_skills.append(skill)
+            else:
+                preferred_skills.append(skill)
+        
+        # Limit to reasonable number of skills
+        required_skills = required_skills[:10]
+        preferred_skills = preferred_skills[:8]
+        
+        return required_skills, preferred_skills
+    
+    def convert_text_to_html(self, text):
+        """Convert plain text description to proper HTML format."""
+        if not text:
+            return text
+        
+        # Clean up the text first
+        text = text.strip()
+        
+        # Split into paragraphs
+        paragraphs = re.split(r'\n\s*\n', text)
+        
+        html_content = []
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            
+            # Check if it's a list item
+            if re.match(r'^[•·*-]\s', para) or re.match(r'^\d+\.\s', para):
+                # Handle bullet points and numbered lists
+                lines = para.split('\n')
+                if len(lines) > 1:
+                    html_content.append('<ul>')
+                    for line in lines:
+                        line = line.strip()
+                        if line:
+                            # Remove bullet points
+                            line = re.sub(r'^[•·*-]\s*', '', line)
+                            line = re.sub(r'^\d+\.\s*', '', line)
+                            html_content.append(f'<li>{line}</li>')
+                    html_content.append('</ul>')
+                else:
+                    # Single list item
+                    para = re.sub(r'^[•·*-]\s*', '', para)
+                    para = re.sub(r'^\d+\.\s*', '', para)
+                    html_content.append(f'<p>• {para}</p>')
+            
+            # Check if it's a heading (all caps or starts with specific words)
+            elif (para.isupper() and len(para) < 100) or \
+                 any(para.lower().startswith(heading) for heading in 
+                     ['about', 'responsibilities', 'requirements', 'qualifications', 
+                      'skills', 'experience', 'what we offer', 'benefits', 'key responsibilities']):
+                html_content.append(f'<h3>{para}</h3>')
+            
+            # Regular paragraph
+            else:
+                # Handle line breaks within paragraphs
+                para = para.replace('\n', '<br>\n')
+                html_content.append(f'<p>{para}</p>')
+        
+        return '\n'.join(html_content)
+    
+    def scrape_company_logo(self, page):
+        """Scrape company logo from the current page."""
+        try:
+            logo_selectors = [
+                'img[alt*="logo"]',
+                'img[class*="logo"]',
+                'img[id*="logo"]',
+                '.company-logo img',
+                '.logo img',
+                '#logo img',
+                '.header img',
+                '.brand img',
+                'img[src*="logo"]'
+            ]
+            
+            for selector in logo_selectors:
+                try:
+                    logo_element = page.locator(selector).first
+                    if logo_element.is_visible():
+                        src = logo_element.get_attribute('src')
+                        if src:
+                            # Convert relative URL to absolute
+                            if src.startswith('//'):
+                                logo_url = 'https:' + src
+                            elif src.startswith('/'):
+                                logo_url = urljoin(self.base_url, src)
+                            elif src.startswith('http'):
+                                logo_url = src
+                            else:
+                                logo_url = urljoin(self.base_url, src)
+                            
+                            # Validate that it's actually an image
+                            if any(ext in logo_url.lower() for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']):
+                                logger.info(f"Found company logo: {logo_url}")
+                                return logo_url
+                except Exception as e:
+                    continue
+            
+            logger.warning("No company logo found")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error scraping company logo: {str(e)}")
+            return None
+    
     def extract_location_info(self, location_text):
         """Extract and get/create location from text."""
         if not location_text:
@@ -146,12 +338,13 @@ class TheCreativeStoreScraper:
         # Clean location text
         location_text = location_text.strip()
         
-        # Try to get existing location
+        # Try to get existing location - use filter().first() to handle duplicates
         try:
-            location = Location.objects.get(name__iexact=location_text)
-            return location
-        except Location.DoesNotExist:
-            pass
+            location = Location.objects.filter(name__iexact=location_text).first()
+            if location:
+                return location
+        except Exception as e:
+            logger.warning(f"Error querying location '{location_text}': {str(e)}")
         
         # Parse Australian location format
         parts = [part.strip() for part in location_text.split(',')]
@@ -160,19 +353,23 @@ class TheCreativeStoreScraper:
             city = parts[0]
             state = parts[1]
             
-            # Create new location
-            location = Location.objects.create(
+            # Try to get or create new location
+            location, created = Location.objects.get_or_create(
                 name=location_text,
-                city=city,
-                state=state,
-                country='Australia'
+                defaults={
+                    'city': city,
+                    'state': state,
+                    'country': 'Australia'
+                }
             )
             return location
         else:
             # Single location name
-            location = Location.objects.create(
+            location, created = Location.objects.get_or_create(
                 name=location_text,
-                country='Australia'
+                defaults={
+                    'country': 'Australia'
+                }
             )
             return location
     
@@ -188,12 +385,22 @@ class TheCreativeStoreScraper:
             except:
                 job_data['title'] = f'Job Position {index + 1}'
             
-            # Extract description
+            # Extract description (get HTML content)
             try:
                 description_element = element.locator('.description').first
-                job_data['description'] = description_element.inner_text().strip()
+                # Try to get HTML content first, then fall back to text
+                try:
+                    description_html = description_element.inner_html().strip()
+                    if description_html:
+                        job_data['description'] = description_html
+                    else:
+                        description_text = description_element.inner_text().strip()
+                        job_data['description'] = self.convert_text_to_html(description_text)
+                except:
+                    description_text = description_element.inner_text().strip()
+                    job_data['description'] = self.convert_text_to_html(description_text)
             except:
-                job_data['description'] = 'No description available'
+                job_data['description'] = '<p>No description available</p>'
             
             # Extract date and job ID
             try:
@@ -223,7 +430,7 @@ class TheCreativeStoreScraper:
                     tags.append(tag_text)
                     
                     # Determine what type of tag this is
-                    if any(city in tag_text for city in ['Sydney', 'Melbourne', 'Brisbane', 'Perth', 'Adelaide', 'Remote', 'Marrickville', 'Surry Hills', 'Cheltenham']):
+                    if any(city in tag_text for city in ['Sydney', 'Melbourne', 'Brisbane', 'Perth', 'Adelaide', 'Remote', 'Marrickville', 'Surry Hills', 'Cheltenham','Townsville']):
                         location = tag_text
                     elif any(job_type_word in tag_text.lower() for job_type_word in ['permanent', 'contract', 'part time', 'full time', 'casual', 'freelance']):
                         job_type = tag_text
@@ -242,6 +449,27 @@ class TheCreativeStoreScraper:
                 job_data['salary'] = None
                 job_data['tags'] = ''
             
+            # Try to extract company logo from job card
+            try:
+                logo_element = element.locator('img').first
+                if logo_element:
+                    logo_src = logo_element.get_attribute('src')
+                    if logo_src:
+                        if logo_src.startswith('//'):
+                            job_data['company_logo'] = 'https:' + logo_src
+                        elif logo_src.startswith('/'):
+                            job_data['company_logo'] = urljoin(self.base_url, logo_src)
+                        elif logo_src.startswith('http'):
+                            job_data['company_logo'] = logo_src
+                        else:
+                            job_data['company_logo'] = urljoin(self.base_url, logo_src)
+                    else:
+                        job_data['company_logo'] = None
+                else:
+                    job_data['company_logo'] = None
+            except:
+                job_data['company_logo'] = None
+
             # Additional info
             job_data['additional_info'] = {
                 'card_index': index,
@@ -275,9 +503,20 @@ class TheCreativeStoreScraper:
                 job_data['title'] = 'Unknown Position'
             
             try:
-                job_data['description'] = page.locator('.job-description, .description, .content').first.inner_text().strip()
+                # Try to get HTML content first, then fall back to text
+                description_element = page.locator('.job-description, .description, .content').first
+                try:
+                    description_html = description_element.inner_html().strip()
+                    if description_html:
+                        job_data['description'] = description_html
+                    else:
+                        description_text = description_element.inner_text().strip()
+                        job_data['description'] = self.convert_text_to_html(description_text)
+                except:
+                    description_text = description_element.inner_text().strip()
+                    job_data['description'] = self.convert_text_to_html(description_text)
             except:
-                job_data['description'] = 'No description available'
+                job_data['description'] = '<p>No description available</p>'
             
             # Location
             try:
@@ -307,6 +546,13 @@ class TheCreativeStoreScraper:
             except:
                 job_data['posted_ago'] = None
             
+            # Scrape company logo
+            try:
+                job_data['company_logo'] = self.scrape_company_logo(page)
+            except Exception as e:
+                logger.warning(f"Error scraping company logo: {str(e)}")
+                job_data['company_logo'] = None
+
             # Additional information
             try:
                 # Extract any additional job details
@@ -348,6 +594,34 @@ class TheCreativeStoreScraper:
                     # Process salary
                     salary_min, salary_max, salary_type, salary_raw = self.extract_salary_info(job_data.get('salary'))
                     
+                    # Extract skills from description
+                    description_text = job_data.get('description', '')
+                    # Convert HTML to text for skill extraction
+                    if description_text:
+                        # Simple HTML to text conversion for skill extraction
+                        import html
+                        text_for_skills = re.sub(r'<[^>]+>', ' ', description_text)
+                        text_for_skills = html.unescape(text_for_skills)
+                        required_skills, preferred_skills = self.extract_skills_from_description(text_for_skills)
+                    else:
+                        required_skills, preferred_skills = [], []
+                    
+                    # Convert skills lists to comma-separated strings
+                    skills_str = ', '.join(required_skills) if required_skills else ''
+                    preferred_skills_str = ', '.join(preferred_skills) if preferred_skills else ''
+                    
+                    # Update company logo if available
+                    company_logo_url = job_data.get('company_logo')
+                    if company_logo_url and self.company:
+                        try:
+                            # Only update if company doesn't have a logo or if we have a better one
+                            if not self.company.logo:
+                                self.company.logo = company_logo_url
+                                self.company.save()
+                                logger.info(f"Updated company logo: {company_logo_url}")
+                        except Exception as e:
+                            logger.warning(f"Error updating company logo: {str(e)}")
+                    
                     # Determine job category (default to 'other' for now)
                     job_category = 'other'  # Could be enhanced with keyword matching
                     
@@ -376,7 +650,7 @@ class TheCreativeStoreScraper:
                     # Create job posting
                     job_posting = JobPosting.objects.create(
                         title=job_data.get('title', 'Unknown Position'),
-                        description=job_data.get('description', 'No description available'),
+                        description=job_data.get('description', '<p>No description available</p>'),
                         company=self.company,
                         posted_by=self.user,
                         location=location,
@@ -392,6 +666,8 @@ class TheCreativeStoreScraper:
                         external_id=job_data.get('external_id', ''),
                         posted_ago=job_data.get('posted_ago', ''),
                         tags=job_data.get('tags', ''),
+                        skills=skills_str,
+                        preferred_skills=preferred_skills_str,
                         additional_info=job_data.get('additional_info', {}),
                         status='active'
                     )

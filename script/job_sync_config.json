@@ -7,12 +7,45 @@
     "password": "Evolgroup@123",
     "port": 5432
   },
+  "machine_verification": {
+    "enabled": true,
+    "mode": "config_based",
+    "require_registration": true,
+    "verify_before_send": true
+  },
+  "authorized_machines": {
+    "source_machines": [
+      {
+        "machine_id": "B98F5D0F-32E1-11E6-9C43-BC0000140000",
+        "hostname": "MZ09",
+        "username": "meera",
+        "ip_address": "192.168.0.124",
+        "is_authorized": true,
+        "description": "Primary scraping machine"
+      }
+    ],
+    "target_machines": [
+      {
+        "username": "TBDProjects",
+        "hostname": "TBDPROJECT", 
+        "machine_id": "",
+        "ip_address": "192.168.0.135",
+        "encrypted_token": "gAAAAABoykNH87rX6S6Pwgk3VY50NCofzhJfee7YC3iViL5iyjyj4oO0wc1emZItNY4ogfaehHxIjmn0239f4XAJ4NakDhBDmSmmjcCs9ACT5zMHr80Vizi_DTuQwRQtpwuXc7tC01Bx2XECU3wmhUhjMcwDVx5kpbjO6fyU6kR2lhUHfb_tXs_Wb9jLSHwkZQwAsf2-IqEX2HkFArx7PJ7VoBoMDhduJg==",
+        "secret_key": "qJy75mDThIw-dV6vxR6BgAqAUQeA54tOOFbZRabOyOc=",
+        "token": "gAAAAABoykNH87rX6S6Pwgk3VY50NCofzhJfee7YC3iViL5iyjyj4oO0wc1emZItNY4ogfaehHxIjmn0239f4XAJ4NakDhBDmSmmjcCs9ACT5zMHr80Vizi_DTuQwRQtpwuXc7tC01Bx2XECU3wmhUhjMcwDVx5kpbjO6fyU6kR2lhUHfb_tXs_Wb9jLSHwkZQwAsf2-IqEX2HkFArx7PJ7VoBoMDhduJg==",
+        "is_authorized": true,
+        "description": "Target receiving machine"
+      }
+    ]
+  },
   "portals": {
     "local_ip": {
       "type": "local",
       "enabled": true,
       "base_url": "http://192.168.0.135:8002/api/v1",
       "endpoint_path": "/jobs/external/create/",
+      "target_machine_id": "TBDPROJECT",
+      "require_machine_verification": true,
       "api_key": "",
       "auth_token": "",
       "headers": {
