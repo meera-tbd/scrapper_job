@@ -389,7 +389,7 @@ class VoyagesScraper:
                 pass
             
             # Default description
-            description = "We are seeking a passionate person who is looking to take an adventure of a lifetime all while growing your career with us."
+            description = "<p>We are seeking a passionate person who is looking to take an adventure of a lifetime all while growing your career with us.</p>"
             closing_date = None
             
             # If we have a job URL that's different from careers page, try to get more details
@@ -416,13 +416,24 @@ class VoyagesScraper:
                     for selector in desc_selectors:
                         desc_element = detail_page.query_selector(selector)
                         if desc_element:
-                            desc_text = desc_element.inner_text().strip()
-                            if len(desc_text) > 50:  # Only use if substantial
-                                description = desc_text
-                                # Extract closing date from description if not found in page content
+                            # Try to get HTML content first
+                            desc_html = desc_element.inner_html()
+                            if desc_html and len(desc_html.strip()) > 50:
+                                description = self.clean_html_description(desc_html)
+                                # Extract closing date from text version if not found in page content
                                 if not closing_date:
+                                    desc_text = desc_element.inner_text().strip()
                                     closing_date = self.extract_closing_date(desc_text)
                                 break
+                            else:
+                                # Fallback to text content formatted as HTML
+                                desc_text = desc_element.inner_text().strip()
+                                if len(desc_text) > 50:  # Only use if substantial
+                                    description = f"<p>{desc_text}</p>"
+                                    # Extract closing date from description if not found in page content
+                                    if not closing_date:
+                                        closing_date = self.extract_closing_date(desc_text)
+                                    break
                     
                     detail_page.close()
                     self.human_like_delay(1, 2)
@@ -430,6 +441,10 @@ class VoyagesScraper:
                 except Exception as e:
                     logger.warning(f"Could not fetch details from {job_url}: {str(e)}")
             
+            # Extract skills from description
+            description_text = description.replace('<p>', '').replace('</p>', '\n').replace('<br>', '\n') if description else ''
+            skills, preferred_skills = self.extract_skills_from_description(description_text, description)
+
             # Build job data
             job_data = {
                 'title': title or 'Unknown Position',
@@ -441,7 +456,9 @@ class VoyagesScraper:
                 'external_id': f"voyages_{hash(job_url + title)}",  # Generate consistent ID
                 'posted_ago': '',
                 'salary_info': '',
-                'closing_date': closing_date
+                'closing_date': closing_date,
+                'skills': skills,
+                'preferred_skills': preferred_skills
             }
             
             logger.info(f"Extracted: {job_data['title']} | {job_data['department']} | {location_text}")
@@ -492,13 +509,15 @@ class VoyagesScraper:
                     posted_ago=job_data['posted_ago'],
                     date_posted=timezone.now(),  # Use current time since no posting date available
                     tags=job_data['department'],  # Use department as tags
+                    job_closing_date=job_data.get('closing_date'),  # Store closing date in dedicated field
+                    skills=job_data.get('skills', ''),  # Store extracted skills
+                    preferred_skills=job_data.get('preferred_skills', ''),  # Store extracted preferred skills
                     additional_info={
                         'department': job_data['department'],
                         'job_type_raw': job_data['job_type_text'],
                         'location_raw': job_data['location_text'],
-                        'closing_date': job_data.get('closing_date'),
                         'scraped_from': 'voyages_careers_page',
-                        'scraper_version': '1.0'
+                        'scraper_version': '2.0'  # Updated version to reflect new features
                     }
                 )
                 
@@ -1349,6 +1368,10 @@ class VoyagesScraper:
             # Get enhanced description and closing date (this may provide better context)
             description, closing_date = self.get_job_description(page, job_url, title)
             
+            # Extract skills from description
+            description_text = description.replace('<p>', '').replace('</p>', '\n').replace('<br>', '\n')
+            skills, preferred_skills = self.extract_skills_from_description(description_text, description)
+            
             # If we visited the job page, try to get location from there too
             enhanced_context = context_text
             if hasattr(self, '_current_job_page_content') and self._current_job_page_content:
@@ -1375,7 +1398,9 @@ class VoyagesScraper:
                 'external_id': f"voyages_{hash(job_url + title)}",
                 'posted_ago': '',
                 'salary_info': '',
-                'closing_date': closing_date
+                'closing_date': closing_date,
+                'skills': skills,
+                'preferred_skills': preferred_skills
             }
             
             return job_data
@@ -1608,8 +1633,8 @@ class VoyagesScraper:
         return None
     
     def get_job_description(self, page, job_url, title):
-        """Get enhanced job description and location from job detail page."""
-        default_description = f"Join our team as a {title}. We are seeking a passionate person who is looking to take an adventure of a lifetime all while growing your career with us at Voyages Indigenous Tourism Australia."
+        """Get enhanced job description in HTML format and closing date from job detail page."""
+        default_description = f"<p>Join our team as a {title}. We are seeking a passionate person who is looking to take an adventure of a lifetime all while growing your career with us at Voyages Indigenous Tourism Australia.</p>"
         
         # Only try to fetch if we have a real job URL
         if job_url == self.careers_url or '#' in job_url:
@@ -1651,20 +1676,27 @@ class VoyagesScraper:
                             if not closing_date:
                                 closing_date = self.extract_closing_date(desc_text)
                             
-                            # Clean up the description but keep closing date info
-                            lines = desc_text.split('\n')
-                            clean_lines = []
-                            for line in lines:
-                                line = line.strip()
-                                if (line and len(line) > 10 and 
-                                    not line.startswith('Apply Now') and
-                                    not line.startswith('Book') and
-                                    not line.startswith('Skip to')):
-                                    clean_lines.append(line)
-                            
-                            if clean_lines:
-                                description = '\n'.join(clean_lines)  # All meaningful lines including closing date
+                            # Get HTML content instead of plain text
+                            desc_html = desc_element.inner_html()
+                            if desc_html:
+                                # Clean up the HTML description
+                                description = self.clean_html_description(desc_html)
                                 break
+                            else:
+                                # Fallback to formatted text if HTML not available
+                                lines = desc_text.split('\n')
+                                clean_lines = []
+                                for line in lines:
+                                    line = line.strip()
+                                    if (line and len(line) > 10 and 
+                                        not line.startswith('Apply Now') and
+                                        not line.startswith('Book') and
+                                        not line.startswith('Skip to')):
+                                        clean_lines.append(f"<p>{line}</p>")
+                                
+                                if clean_lines:
+                                    description = '\n'.join(clean_lines)
+                                    break
                 except:
                     continue
                 
@@ -1685,6 +1717,244 @@ class VoyagesScraper:
             logger.warning(f"Could not fetch description from {job_url}: {str(e)}")
         
         return default_description, None
+
+    def clean_html_description(self, html_content):
+        """Clean up HTML description content for better formatting."""
+        import re
+        
+        # Remove unwanted elements and clean up HTML
+        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<(noscript|iframe|object|embed)[^>]*>.*?</\1>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove Apply Now buttons and similar application elements
+        html_content = re.sub(r'<[^>]*class="apply[^"]*"[^>]*>.*?</[^>]*>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<[^>]*class="btn[^"]*"[^>]*>.*?</[^>]*>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<[^>]*(?:apply now|apply|book|skip to|join us|prev|next)[^>]*>.*?</[^>]*>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove links that contain application URLs
+        html_content = re.sub(r'<a[^>]*href="[^"]*apply[^"]*"[^>]*>.*?</a>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<a[^>]*href="[^"]*jobadder[^"]*"[^>]*>.*?</a>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove navigation elements
+        html_content = re.sub(r'<div[^>]*class="[^"]*glide[^"]*"[^>]*>.*?</div>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<button[^>]*class="[^"]*glide[^"]*"[^>]*>.*?</button>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove any remaining button elements
+        html_content = re.sub(r'<button[^>]*>.*?</button>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Remove image elements and related content
+        html_content = re.sub(r'<img[^>]*>', '', html_content, flags=re.IGNORECASE)
+        html_content = re.sub(r'<picture[^>]*>.*?</picture>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<figure[^>]*>.*?</figure>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<svg[^>]*>.*?</svg>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Clean up empty paragraphs and extra whitespace
+        html_content = re.sub(r'<p[\s]*?/?>', '', html_content)
+        html_content = re.sub(r'</p>[\s]*<p>', '</p>\n<p>', html_content)
+        html_content = re.sub(r'\s+', ' ', html_content)
+        html_content = re.sub(r'>\s+<', '><', html_content)
+        
+        # Ensure proper paragraph structure
+        if html_content.strip() and not html_content.strip().startswith('<'):
+            html_content = f"<p>{html_content.strip()}</p>"
+        
+        return html_content.strip()
+
+    def extract_skills_from_description(self, description_text, description_html=None):
+        """Extract skills and preferred skills from job description using enhanced keyword matching."""
+        import re
+        
+        # Combine text and HTML for better analysis
+        full_text = description_text
+        if description_html:
+            # Remove HTML tags for text analysis
+            text_from_html = re.sub('<[^<]+?>', '', description_html)
+            full_text = f"{description_text}\n{text_from_html}"
+        
+        full_text_lower = full_text.lower()
+        
+        # Enhanced skill categories with more comprehensive lists
+        technical_skills = [
+            # Software & Programming
+            'python', 'java', 'javascript', 'html', 'css', 'sql', 'php', 'c++', 'c#', '.net',
+            'react', 'angular', 'vue', 'node.js', 'django', 'flask', 'spring', 'laravel',
+            'git', 'github', 'docker', 'kubernetes', 'aws', 'azure', 'gcp', 'jenkins',
+            'mysql', 'postgresql', 'mongodb', 'oracle', 'redis', 'elasticsearch',
+            'linux', 'windows', 'macos', 'ubuntu', 'centos', 'apache', 'nginx',
+            
+            # Business & Office - Enhanced
+            'microsoft office', 'ms office', 'excel', 'word', 'powerpoint', 'outlook', 'sharepoint',
+            'salesforce', 'crm', 'erp', 'sap', 'quickbooks', 'xero', 'sage', 'myob',
+            'project management', 'scrum', 'agile', 'kanban', 'jira', 'trello', 'asana',
+            'data analysis', 'tableau', 'power bi', 'analytics', 'reporting', 'data entry',
+            
+            # Industry Specific - Enhanced
+            'pos system', 'point of sale', 'inventory management', 'stock control', 'eftpos',
+            'cash handling', 'payment processing', 'customer service', 'retail systems',
+            'hospitality software', 'property management', 'booking systems', 'reservation systems',
+            'food safety', 'rsa', 'responsible service of alcohol', 'barista', 'coffee making',
+            'first aid', 'cpr', 'whs', 'workplace health safety', 'ohs', 'occupational health',
+            'rsg', 'responsible service of gaming', 'gaming', 'liquor license',
+            
+            # Trade Skills - Enhanced
+            'electrical', 'plumbing', 'carpentry', 'painting', 'maintenance', 'repairs',
+            'hvac', 'refrigeration', 'welding', 'machinery operation', 'equipment operation',
+            'forklift', 'crane operation', 'white card', 'blue card', 'working at heights',
+            'confined space', 'manual handling',
+            
+            # Hospitality & Tourism Specific
+            'front office', 'reception', 'concierge', 'housekeeping', 'room service',
+            'food handling', 'wine knowledge', 'sommelier', 'tour guiding', 'cultural awareness'
+        ]
+        
+        soft_skills = [
+            'communication', 'teamwork', 'team work', 'leadership', 'problem solving', 'time management',
+            'customer service', 'attention to detail', 'multitasking', 'multi-tasking', 'flexibility',
+            'adaptability', 'reliability', 'punctuality', 'initiative', 'creativity',
+            'interpersonal skills', 'interpersonal', 'organizational skills', 'analytical thinking',
+            'decision making', 'conflict resolution', 'negotiation', 'presentation skills',
+            'enthusiasm', 'positive attitude', 'professional', 'friendly', 'approachable',
+            'cultural sensitivity', 'cultural awareness', 'patience', 'empathy'
+        ]
+        
+        qualifications = [
+            'bachelor', 'master', 'diploma', 'certificate', 'degree', 'phd', 'doctorate',
+            'tafe', 'university', 'tertiary', 'qualification', 'license', 'certification',
+            'trade certificate', 'apprenticeship', 'traineeship', 'cert iii', 'cert iv',
+            'certificate iii', 'certificate iv', 'advanced diploma'
+        ]
+        
+        # Extract all potential skills first
+        all_found_skills = set()
+        
+        # Check for all skill types across all text
+        all_skills_to_check = technical_skills + soft_skills + qualifications
+        
+        for skill in all_skills_to_check:
+            # Use word boundaries for better matching
+            pattern = r'\b' + re.escape(skill.lower()) + r'\b'
+            if re.search(pattern, full_text_lower):
+                all_found_skills.add(skill.title())
+        
+        # Now categorize into required vs preferred
+        found_skills = set()
+        preferred_skills = set()
+        
+        # Enhanced indicators for better categorization
+        required_indicators = [
+            'required', 'essential', 'must have', 'mandatory', 'necessary', 'need', 'minimum',
+            'key duties', 'responsibilities', 'you will', 'duties include', 'requirements'
+        ]
+        preferred_indicators = [
+            'preferred', 'desirable', 'advantageous', 'beneficial', 'nice to have', 'ideal',
+            'bonus', 'plus', 'would be an advantage', 'highly regarded', 'advantage'
+        ]
+        
+        # Try to find section-based categorization first
+        sections = re.split(r'\n|<br>|<p>|</p>', full_text)
+        
+        current_section_type = 'required'  # Default to required
+        
+        for section in sections:
+            section_lower = section.lower().strip()
+            if not section_lower:
+                continue
+            
+            # Check if this section indicates preferred skills
+            if any(indicator in section_lower for indicator in preferred_indicators):
+                current_section_type = 'preferred'
+            elif any(indicator in section_lower for indicator in required_indicators):
+                current_section_type = 'required'
+            
+            # Find skills in this section
+            section_skills = set()
+            for skill in all_skills_to_check:
+                pattern = r'\b' + re.escape(skill.lower()) + r'\b'
+                if re.search(pattern, section_lower):
+                    section_skills.add(skill.title())
+            
+            # Categorize based on current section type
+            if current_section_type == 'preferred':
+                preferred_skills.update(section_skills)
+            else:
+                found_skills.update(section_skills)
+        
+        # Fallback: if we didn't find any skills through section analysis, use sentence analysis
+        if not found_skills and not preferred_skills:
+            sentences = re.split(r'[.!?;\n]', full_text)
+            
+            for sentence in sentences:
+                sentence_lower = sentence.lower().strip()
+                if not sentence_lower:
+                    continue
+                
+                # Determine if this sentence is about required or preferred skills
+                is_preferred = any(indicator in sentence_lower for indicator in preferred_indicators)
+                is_required = any(indicator in sentence_lower for indicator in required_indicators)
+                
+                # Find skills in this sentence
+                sentence_skills = set()
+                for skill in all_skills_to_check:
+                    pattern = r'\b' + re.escape(skill.lower()) + r'\b'
+                    if re.search(pattern, sentence_lower):
+                        sentence_skills.add(skill.title())
+                
+                # Categorize found skills
+                if sentence_skills:
+                    if is_preferred and not is_required:
+                        preferred_skills.update(sentence_skills)
+                    else:
+                        found_skills.update(sentence_skills)
+        
+        # Ensure we have skills in both categories if we found any
+        if all_found_skills and not preferred_skills:
+            # Split skills intelligently - move soft skills to preferred
+            for skill in list(found_skills):
+                skill_lower = skill.lower()
+                if any(soft_skill in skill_lower for soft_skill in [
+                    'communication', 'teamwork', 'leadership', 'customer service', 'flexibility',
+                    'adaptability', 'creativity', 'interpersonal', 'enthusiasm', 'positive',
+                    'friendly', 'cultural', 'patience', 'empathy'
+                ]):
+                    preferred_skills.add(skill)
+                    found_skills.discard(skill)
+        
+        # If still no clear division and we have many skills, split them 60/40
+        if all_found_skills and not preferred_skills and len(found_skills) > 4:
+            skills_list = list(found_skills)
+            split_point = max(1, len(skills_list) * 3 // 5)  # 60% required, 40% preferred
+            
+            # Sort to ensure consistent results
+            skills_list.sort()
+            main_skills = skills_list[:split_point]
+            pref_skills = skills_list[split_point:]
+            
+            found_skills = set(main_skills)
+            preferred_skills = set(pref_skills)
+        
+        # Convert to comma-separated strings (max 200 chars each as per model)
+        skills_str = ', '.join(sorted(found_skills))[:200] if found_skills else ''
+        preferred_skills_str = ', '.join(sorted(preferred_skills))[:200] if preferred_skills else ''
+        
+        # Ensure we have at least some skills in both fields if we found any skills at all
+        if all_found_skills and not skills_str:
+            # Move some from preferred back to required
+            pref_list = list(preferred_skills)
+            if len(pref_list) > 2:
+                skills_str = ', '.join(pref_list[:len(pref_list)//2])[:200]
+                preferred_skills_str = ', '.join(pref_list[len(pref_list)//2:])[:200]
+        elif all_found_skills and not preferred_skills_str:
+            # Move some from required to preferred
+            req_list = list(found_skills)
+            if len(req_list) > 2:
+                skills_str = ', '.join(req_list[:len(req_list)//2])[:200]
+                preferred_skills_str = ', '.join(req_list[len(req_list)//2:])[:200]
+        
+        logger.info(f"Extracted skills: {skills_str}")
+        logger.info(f"Extracted preferred skills: {preferred_skills_str}")
+        
+        return skills_str, preferred_skills_str
 
 
 def main():
