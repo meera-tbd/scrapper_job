@@ -1103,6 +1103,10 @@ class JobDataSynchronizer:
             adapter: Optional[JobPortalAdapter] = None
             if portal_type in ('http', 'local'):
                 adapter = LocalPortalAdapter(portal_name, portal_cfg)
+            elif portal_type == 'flyoverseas':
+                adapter = FlyoverseasAdapter(portal_name, portal_cfg)
+            elif portal_type == 'evoljobs':
+                adapter = EvolJobsAdapter(portal_name, portal_cfg)
             else:
                 self.logger.warning(f"Unknown portal type '{portal_type}' for '{portal_name}', skipping")
                 continue
