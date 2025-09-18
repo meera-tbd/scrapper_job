@@ -158,6 +158,277 @@ def _find_salary_raw(text: str) -> str:
     return ""
 
 
+def _extract_html_description(soup: BeautifulSoup) -> str:
+    """Extract and clean job description as HTML format."""
+    # Try different selectors for job description
+    description_selectors = [
+        ".job-description",
+        ".description", 
+        ".job-content",
+        ".job-details",
+        "main .content",
+        "article",
+        ".prose",
+        "[role='main']"
+    ]
+    
+    description_element = None
+    for selector in description_selectors:
+        element = soup.select_one(selector)
+        if element and element.get_text(strip=True):
+            description_element = element
+            break
+    
+    if not description_element:
+        # Fallback to body content
+        description_element = soup.body or soup
+    
+    # Clean the HTML
+    html_content = str(description_element)
+    
+    # Remove unwanted elements
+    temp_soup = BeautifulSoup(html_content, "html.parser")
+    
+    # Remove script, style, nav, footer, header elements
+    for unwanted in temp_soup.find_all(['script', 'style', 'nav', 'footer', 'header']):
+        unwanted.decompose()
+    
+    # Remove elements with unwanted classes/ids
+    unwanted_patterns = ['nav', 'footer', 'header', 'sidebar', 'advertisement', 'ad-', 'cookie']
+    for pattern in unwanted_patterns:
+        for element in temp_soup.find_all(attrs={'class': re.compile(pattern, re.I)}):
+            element.decompose()
+        for element in temp_soup.find_all(attrs={'id': re.compile(pattern, re.I)}):
+            element.decompose()
+    
+    # Get inner HTML content
+    if temp_soup.body:
+        html_content = ''.join(str(child) for child in temp_soup.body.children)
+    else:
+        html_content = str(temp_soup)
+    
+    # Clean up HTML
+    html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL)
+    html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL)
+    html_content = re.sub(r'<!--.*?-->', '', html_content, flags=re.DOTALL)
+    html_content = re.sub(r'\s+', ' ', html_content)
+    html_content = html_content.strip()
+    
+    # If no proper HTML structure, wrap text in paragraphs
+    if not re.search(r'<(p|div|h[1-6]|ul|ol|li)', html_content):
+        text_content = BeautifulSoup(html_content, "html.parser").get_text()
+        if text_content.strip():
+            paragraphs = [p.strip() for p in text_content.split('\n') if p.strip()]
+            html_content = ''.join(f'<p>{p}</p>' for p in paragraphs)
+    
+    return html_content or "<p>Job description not available</p>"
+
+
+def _extract_skills_from_description(description_text: str, title: str = "") -> tuple[str, str]:
+    """Extract skills and preferred skills from job description text."""
+    if not description_text:
+        return "", ""
+    
+    # Convert HTML to text if needed
+    if '<' in description_text and '>' in description_text:
+        soup = BeautifulSoup(description_text, 'html.parser')
+        text_content = soup.get_text()
+    else:
+        text_content = description_text
+    
+    # Combine title and description for analysis
+    combined_text = f"{title} {text_content}".lower()
+    
+    # Education and teaching specific skills
+    education_skills = [
+        # Teaching specializations
+        'primary teaching', 'secondary teaching', 'early childhood', 'special education', 'esol', 'esl',
+        'literacy', 'numeracy', 'mathematics', 'science', 'english', 'history', 'geography', 'art',
+        'music', 'physical education', 'pe', 'drama', 'languages', 'stem', 'steam',
+        
+        # Teaching qualifications and certifications
+        'bachelor of education', 'bed', 'teaching degree', 'dit', 'graduate diploma teaching',
+        'teaching registration', 'vit registration', 'nesa accreditation', 'working with children',
+        'wwcc', 'blue card', 'yellow card', 'first aid', 'cpr', 'anaphylaxis', 'asthma',
+        
+        # Teaching methods and approaches
+        'differentiated instruction', 'inclusive education', 'play based learning', 'inquiry learning',
+        'project based learning', 'collaborative learning', 'assessment', 'rubrics', 'scaffolding',
+        'classroom management', 'behaviour management', 'positive behaviour support', 'restorative practices',
+        
+        # Technology and digital skills
+        'google classroom', 'microsoft teams', 'seesaw', 'schoology', 'canvas', 'moodle', 'blackboard',
+        'interactive whiteboard', 'smartboard', 'ipad', 'chromebook', 'educational technology',
+        'digital literacy', 'coding', 'robotics', 'scratch programming',
+        
+        # Curriculum frameworks
+        'australian curriculum', 'victorian curriculum', 'nsw syllabus', 'queensland curriculum',
+        'early years learning framework', 'eylf', 'national quality standard', 'nqs',
+        'ib curriculum', 'cambridge curriculum', 'montessori', 'waldorf', 'steiner',
+        
+        # Professional skills
+        'lesson planning', 'curriculum development', 'student assessment', 'parent communication',
+        'report writing', 'data analysis', 'professional learning', 'mentoring', 'supervision'
+    ]
+    
+    # General professional skills
+    general_skills = [
+        'communication', 'leadership', 'teamwork', 'collaboration', 'problem solving',
+        'critical thinking', 'creativity', 'organization', 'time management', 'adaptability',
+        'empathy', 'patience', 'cultural awareness', 'diversity', 'inclusion', 'equity'
+    ]
+    
+    # Combine all skills
+    all_skills = education_skills + general_skills
+    
+    found_skills = []
+    preferred_skills = []
+    
+    for skill in all_skills:
+        if skill in combined_text:
+            found_skills.append(skill.title())
+    
+    # Look for preferred/desired skills section
+    preferred_patterns = [
+        r'preferred[^:]*:([^.]*)',
+        r'desired[^:]*:([^.]*)', 
+        r'advantageous[^:]*:([^.]*)',
+        r'would be an advantage[^:]*:([^.]*)',
+        r'highly regarded[^:]*:([^.]*)'
+    ]
+    
+    for pattern in preferred_patterns:
+        matches = re.findall(pattern, text_content, re.IGNORECASE)
+        for match in matches:
+            for skill in all_skills:
+                if skill in match.lower():
+                    preferred_skills.append(skill.title())
+    
+    # If no specific preferred skills found, use last 50% of found skills as preferred
+    if not preferred_skills and found_skills:
+        mid_point = len(found_skills) // 2
+        preferred_skills = found_skills[mid_point:]
+        found_skills = found_skills[:mid_point] if mid_point > 0 else found_skills
+    
+    # Ensure we have some skills
+    if not found_skills and not preferred_skills:
+        # Extract from title
+        title_lower = title.lower()
+        if 'teacher' in title_lower:
+            found_skills.append('Teaching')
+        if 'psychology' in title_lower:
+            found_skills.append('Psychology')
+        if 'primary' in title_lower:
+            found_skills.append('Primary Education')
+        if 'secondary' in title_lower:
+            found_skills.append('Secondary Education')
+    
+    # Remove duplicates while preserving order
+    found_skills = list(dict.fromkeys(found_skills))
+    preferred_skills = list(dict.fromkeys(preferred_skills))
+    
+    # Limit to reasonable lengths and convert to CSV
+    skills_csv = ', '.join(found_skills[:10])[:200]  # Max 200 chars
+    preferred_csv = ', '.join(preferred_skills[:10])[:200]  # Max 200 chars
+    
+    return skills_csv, preferred_csv
+
+
+def _extract_closing_date(text: str, kv: dict) -> str:
+    """Extract job closing date from text and key-value pairs."""
+    # First check key-value pairs
+    for key in kv:
+        key_lower = key.lower()
+        if any(term in key_lower for term in ['closing', 'close', 'deadline', 'due', 'expires', 'until']):
+            date_value = kv[key].strip()
+            if date_value:
+                return date_value
+    
+    # Enhanced pattern matching for dates - ordered by specificity
+    date_patterns = [
+        # Format: "Closes: Oct 26, 2025" or "Closes: Sep 21, 2025"
+        r'(?:closes?|closing|deadline|due|expires?|until|by)\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})',
+        
+        # Format: "Closes: 26 October 2025" or "Closes: 21 September 2025"
+        r'(?:closes?|closing|deadline|due|expires?|until|by)\s*:?\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9},?\s+\d{4})',
+        
+        # Format: "Closes: 26/10/2025" or "Closes: 21/09/2025"
+        r'(?:closes?|closing|deadline|due|expires?|until|by)\s*:?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+        
+        # Format: "Applications close Oct 26, 2025"
+        r'applications?\s+(?:close|due|must be received)\s+(?:by|on)?\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})',
+        
+        # Format: "Applications close 26 October 2025"
+        r'applications?\s+(?:close|due|must be received)\s+(?:by|on)?\s*:?\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9},?\s+\d{4})',
+        
+        # Format: "Applications close 26/10/2025"
+        r'applications?\s+(?:close|due|must be received)\s+(?:by|on)?\s*:?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+        
+        # Generic month-day-year patterns
+        r'(?:closes?|ends?|expires?|deadline)\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})',
+        r'(?:closes?|ends?|expires?|deadline)\s*:?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})',
+        
+        # Standalone date patterns (fallback)
+        r'\b([A-Za-z]{3,9}\s+\d{1,2},?\s+2025)\b',  # Focus on 2025 dates
+        r'\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]2025)\b',  # Focus on 2025 dates
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            extracted_date = match.group(1).strip()
+            # Basic validation - ensure we have a reasonable date
+            if len(extracted_date) > 5 and ('2024' in extracted_date or '2025' in extracted_date or '2026' in extracted_date):
+                return extracted_date
+    
+    return ""
+
+
+def _extract_closing_date_from_html(soup: BeautifulSoup) -> str:
+    """Extract closing date from HTML structure specifically."""
+    # Look for specific HTML elements that might contain closing dates
+    date_selectors = [
+        '[class*="close"]',
+        '[class*="deadline"]', 
+        '[class*="date"]',
+        '.date-posted',
+        '.closing-date',
+        '.deadline',
+        '.expires',
+        'time',
+        '[datetime]'
+    ]
+    
+    for selector in date_selectors:
+        elements = soup.select(selector)
+        for element in elements:
+            text = element.get_text(strip=True)
+            if text and len(text) > 5:
+                # Check if this looks like a closing date
+                if any(keyword in text.lower() for keyword in ['close', 'deadline', 'due', 'expire', 'until']):
+                    # Extract date from this text
+                    date_match = re.search(r'([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})', text)
+                    if not date_match:
+                        date_match = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', text)
+                    if date_match:
+                        return date_match.group(1).strip()
+    
+    # Look for datetime attributes
+    datetime_elements = soup.find_all(attrs={'datetime': True})
+    for element in datetime_elements:
+        datetime_val = element.get('datetime', '')
+        if datetime_val and ('2024' in datetime_val or '2025' in datetime_val or '2026' in datetime_val):
+            # Format datetime to readable format
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(datetime_val.replace('Z', '+00:00'))
+                return dt.strftime('%b %d, %Y')
+            except:
+                return datetime_val
+    
+    return ""
+
+
 def extract_detail_fields(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     candidates = [
@@ -226,8 +497,28 @@ def extract_detail_fields(html: str) -> dict:
     salary_raw = kv.get("Salary", "") or _find_salary_raw(full_text)
     date_advertised = kv.get("Date Advertised", "")
 
-    # Clean description: remove ads/CTAs
-    description = _clean_description(full_text)
+    # Extract HTML description
+    html_description = _extract_html_description(soup)
+    
+    # Clean description: remove ads/CTAs (for text analysis)
+    description_text = _clean_description(full_text)
+    
+    # Extract skills from description
+    skills, preferred_skills = _extract_skills_from_description(description_text, title or "")
+    
+    # Extract closing date - try both text and HTML
+    closing_date = _extract_closing_date(full_text, kv)
+    if not closing_date:
+        # Try extracting from HTML structure as well
+        closing_date = _extract_closing_date_from_html(soup)
+    
+    if closing_date:
+        logger.info(f"✅ Found closing date: '{closing_date}' for job: {title[:50] if title else 'Unknown'}")
+    else:
+        logger.warning(f"❌ No closing date found for job: {title[:50] if title else 'Unknown'}")
+        # Log a sample of the text to help debug
+        sample_text = full_text[:500] if full_text else "No text available"
+        logger.debug(f"Sample text for debugging: {sample_text}")
 
     return {
         "title": title,
@@ -236,7 +527,11 @@ def extract_detail_fields(html: str) -> dict:
         "job_type_raw": job_type_raw,
         "salary_raw": salary_raw,
         "date_advertised": date_advertised,
-        "description": description,
+        "description": html_description,  # Now HTML format
+        "description_text": description_text,  # Keep text version for analysis
+        "skills": skills,
+        "preferred_skills": preferred_skills,
+        "closing_date": closing_date,
         "kv": kv,
     }
 
@@ -408,7 +703,22 @@ def _collect_listing_links(page, max_pages: int = 9999, pause_ms: int = 500) -> 
         except Exception:
             return False
 
-    page.goto(BASE_URL, wait_until="networkidle")
+    # Navigate to base URL with retry logic and increased timeout
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempting to navigate to {BASE_URL} (attempt {attempt + 1}/{max_retries})")
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)  # Increased timeout to 60s
+            page.wait_for_timeout(2000)  # Additional wait for page to stabilize
+            logger.info("Successfully navigated to base URL")
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Failed to navigate to {BASE_URL} after {max_retries} attempts: {e}")
+                raise
+            logger.warning(f"Navigation attempt {attempt + 1} failed: {e}. Retrying...")
+            page.wait_for_timeout(3000)  # Wait before retry
+    
     collect_from_current_page()
 
     # Try to detect URL pattern for direct page navigation (preferred)
@@ -474,8 +784,23 @@ def scrape_teaching_jobs(max_jobs: int = 100, max_pages: int = 9999):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={"width": 1400, "height": 900})
+        context = browser.new_context(
+            viewport={"width": 1400, "height": 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            }
+        )
         page = context.new_page()
+        
+        # Set additional navigation timeout for all page operations
+        page.set_default_navigation_timeout(60000)  # 60 seconds
+        page.set_default_timeout(30000)  # 30 seconds for other operations
         links = _collect_listing_links(page, max_pages=max_pages)
         if max_jobs:
             random.shuffle(links)
@@ -483,22 +808,41 @@ def scrape_teaching_jobs(max_jobs: int = 100, max_pages: int = 9999):
         logger.info("Collected %d job links to process", len(links))
 
         seen_urls = set()
-        for url in links:
+        for i, url in enumerate(links):
             if url in seen_urls:
                 continue
             seen_urls.add(url)
             detail = context.new_page()
             try:
-                detail.goto(url, wait_until="domcontentloaded")
-                detail.wait_for_timeout(800)
-                html = detail.content()
-                fields = extract_detail_fields(html)
-                scraped_items.append({"url": url, **fields})
-                logger.info("Scraped detail: %s", url)
+                # Navigate to detail page with retry logic
+                max_detail_retries = 2
+                detail_success = False
+                for detail_attempt in range(max_detail_retries):
+                    try:
+                        detail.goto(url, wait_until="domcontentloaded", timeout=45000)
+                        detail.wait_for_timeout(1000)  # Wait for page to stabilize
+                        detail_success = True
+                        break
+                    except Exception as nav_e:
+                        if detail_attempt == max_detail_retries - 1:
+                            logger.warning("Failed to navigate to detail page %s after %d attempts: %s", url, max_detail_retries, nav_e)
+                            raise nav_e
+                        logger.warning("Detail navigation attempt %d failed for %s: %s. Retrying...", detail_attempt + 1, url, nav_e)
+                        detail.wait_for_timeout(2000)
+                
+                if detail_success:
+                    html = detail.content()
+                    fields = extract_detail_fields(html)
+                    scraped_items.append({"url": url, **fields})
+                    logger.info("Scraped detail: %s (%d/%d)", url, i+1, len(links))
             except Exception as e:
                 logger.exception("Failed to scrape %s: %s", url, e)
             finally:
                 detail.close()
+                
+            # Add a small delay between requests to be respectful
+            if i < len(links) - 1:  # Don't wait after the last item
+                page.wait_for_timeout(random.randint(1000, 3000))
 
         browser.close()
 
@@ -520,7 +864,7 @@ def scrape_teaching_jobs(max_jobs: int = 100, max_pages: int = 9999):
 
             job = JobPosting(
                 title=title,
-                description=item["description"][:20000],
+                description=item["description"][:20000],  # HTML description
                 company=company,
                 posted_by=user,
                 location=location,
@@ -535,17 +879,26 @@ def scrape_teaching_jobs(max_jobs: int = 100, max_pages: int = 9999):
                 external_url=item["url"],
                 posted_ago="",
                 date_posted=None,
-                tags=", ".join(JobCategorizationService.get_job_keywords(title, item["description"]))[:200],
+                skills=item["skills"][:200] if item["skills"] else "",  # Skills field
+                preferred_skills=item["preferred_skills"][:200] if item["preferred_skills"] else "",  # Preferred skills field
+                job_closing_date=item.get("closing_date", "") or "",  # Closing date field
+                tags=", ".join(JobCategorizationService.get_job_keywords(title, item.get("description_text", item["description"])))[:200],
                 additional_info={
                     "job_type_raw": item["job_type_raw"],
                     "salary_raw": item["salary_raw"],
                     "date_advertised": item["date_advertised"],
+                    "closing_date": item["closing_date"],
+                    "skills_extracted": item["skills"],
+                    "preferred_skills_extracted": item["preferred_skills"],
                     "kv_pairs": item["kv"],
                 },
             )
             job.save()
             inserted += 1
-            logger.info("Saved: %s @ %s [%s]", title, company.name, item["url"])
+            
+            # Log closing date specifically for debugging
+            closing_date_info = f" | Closing: {item.get('closing_date', 'None')}" if item.get('closing_date') else " | Closing: None"
+            logger.info("Saved: %s @ %s [%s]%s", title, company.name, item["url"], closing_date_info)
         except Exception as e:
             logger.exception("Failed to save job %s: %s", item.get("url"), e)
 

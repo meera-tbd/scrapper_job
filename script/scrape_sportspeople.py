@@ -4,6 +4,7 @@ import sys
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from datetime import datetime, timedelta
 
 import django
 from bs4 import BeautifulSoup
@@ -25,7 +26,8 @@ TITLE_LINK_SELECTOR = ".job-teaser__title a, a.job-teaser__title, .job-teaser a[
 EMPLOYER_SELECTOR = ".job-teaser__employer-name, .job-teaser__employer a, .job-teaser__employer"
 LOCATION_FEATURE_SELECTOR = ".features li.loc, [class*='location']"
 SALARY_FEATURE_SELECTOR = ".features li.sal, [class*='salary']"
-CLOSING_DATE_SELECTOR = ".job-teaser__closing__date, .job-teaser__closing, .closing-date"
+CLOSING_DATE_SELECTOR = ".job-teaser__closing__date, .job-teaser__closing, .closing-date, .closing, [class*='closing'], [class*='expires']"
+COMPANY_LOGO_SELECTOR = ".job-teaser__employer img, .employer img, .company-logo img, .logo img, img[src*='logo']"
 
 
 @dataclass
@@ -35,10 +37,15 @@ class ScrapedJob:
     location_text: str
     job_url: str
     description: str
+    description_html: str
     job_type: str
     salary_text: str
     work_mode: str
     external_id: str
+    closing_date: str
+    company_logo_url: str
+    skills: str
+    preferred_skills: str
 
 
 def human_sleep(seconds: float = 0.8) -> None:
@@ -96,6 +103,438 @@ def detect_work_mode(text: str) -> str:
     return "On-site"
 
 
+def extract_skills_from_description(description: str, title: str = "") -> Tuple[str, str]:
+    """
+    Extract skills and preferred skills from job description.
+    Returns (skills, preferred_skills) as comma-separated strings.
+    """
+    if not description:
+        return "", ""
+    
+    # Convert HTML to text for analysis
+    text = re.sub(r'<[^>]+>', ' ', description).lower()
+    text = re.sub(r'\s+', ' ', text).strip()
+    title_text = title.lower() if title else ""
+    
+    # Comprehensive skills list for Australian sports/fitness industry
+    technical_skills = [
+        # Sports & Fitness
+        'coaching', 'personal training', 'fitness training', 'sports coaching', 'athletic training',
+        'strength training', 'conditioning', 'rehabilitation', 'physiotherapy', 'sports medicine',
+        'nutrition', 'sports nutrition', 'biomechanics', 'exercise physiology', 'kinesiology',
+        'first aid', 'cpr', 'aed', 'sports safety', 'injury prevention', 'injury management',
+        
+        # Certifications & Qualifications
+        'cert iii', 'cert iv', 'certificate iii', 'certificate iv', 'diploma', 'bachelor',
+        'masters', 'fitness australia', 'reps', 'essa', 'sports medicine australia',
+        'australian strength conditioning', 'level 1 coach', 'level 2 coach', 'accredited coach',
+        
+        # Technical & Digital
+        'microsoft office', 'excel', 'word', 'powerpoint', 'outlook', 'teams', 'zoom',
+        'canva', 'adobe', 'photoshop', 'social media', 'facebook', 'instagram', 'twitter',
+        'linkedin', 'youtube', 'tiktok', 'website management', 'cms', 'wordpress',
+        'google analytics', 'marketing', 'digital marketing', 'email marketing',
+        
+        # Business & Management
+        'project management', 'team leadership', 'staff management', 'budget management',
+        'event management', 'program development', 'strategic planning', 'business development',
+        'customer service', 'member retention', 'sales', 'membership sales',
+        
+        # Communication & Interpersonal
+        'communication', 'public speaking', 'presentation', 'writing', 'report writing',
+        'relationship building', 'networking', 'collaboration', 'teamwork',
+        
+        # Specific Equipment & Systems
+        'gym equipment', 'fitness equipment', 'cardio equipment', 'strength equipment',
+        'functional training', 'crossfit', 'pilates', 'yoga', 'swimming', 'aquatic programs',
+        'group fitness', 'class instruction', 'personal training software', 'booking systems'
+    ]
+    
+    soft_skills = [
+        'leadership', 'teamwork', 'communication', 'problem solving', 'time management',
+        'adaptability', 'flexibility', 'creativity', 'initiative', 'attention to detail',
+        'customer focus', 'results oriented', 'analytical thinking', 'decision making',
+        'interpersonal skills', 'organizational skills', 'multitasking', 'stress management',
+        'conflict resolution', 'mentoring', 'coaching skills', 'motivational skills',
+        'empathy', 'patience', 'enthusiasm', 'professionalism', 'reliability',
+        'punctuality', 'work ethic', 'positive attitude'
+    ]
+    
+    all_skills = technical_skills + soft_skills
+    found_skills = []
+    
+    # Find skills in text with multiple matching strategies
+    for skill in all_skills:
+        skill_lower = skill.lower()
+        skill_found = False
+        
+        # Strategy 1: Exact word boundary match
+        pattern = r'\b' + re.escape(skill_lower) + r'\b'
+        if re.search(pattern, text) or re.search(pattern, title_text):
+            skill_found = True
+        
+        # Strategy 2: Partial match for compound skills (e.g., "project management")
+        elif ' ' in skill_lower:
+            # Split compound skill and check if all parts are present
+            skill_parts = skill_lower.split()
+            if all(part in text or part in title_text for part in skill_parts):
+                skill_found = True
+        
+        # Strategy 3: Fuzzy matching for common variations
+        elif any(variation in text or variation in title_text for variation in get_skill_variations(skill_lower)):
+            skill_found = True
+        
+        if skill_found:
+            found_skills.append(skill.title())
+    
+    # Remove duplicates while preserving order
+    found_skills = list(dict.fromkeys(found_skills))
+    
+    # Split skills between required and preferred based on context
+    required_skills = []
+    preferred_skills = []
+    
+    # Look for sections that indicate required vs preferred
+    required_indicators = [
+        'essential', 'required', 'must have', 'mandatory', 'necessary',
+        'minimum requirements', 'key requirements', 'you will need',
+        'successful candidate will', 'candidate must'
+    ]
+    
+    preferred_indicators = [
+        'preferred', 'desirable', 'advantageous', 'beneficial', 'nice to have',
+        'would be an advantage', 'highly regarded', 'valued', 'plus',
+        'bonus', 'additional', 'ideal candidate'
+    ]
+    
+    # Split description into sections for better categorization
+    sections = re.split(r'\n\s*\n|\.|;', text)
+    
+    for skill in found_skills:
+        skill_lower = skill.lower()
+        found_in_preferred = False
+        found_in_required = False
+        
+        # Check if skill appears in preferred context
+        for section in sections:
+            section_lower = section.lower()
+            if skill_lower in section_lower:
+                for indicator in preferred_indicators:
+                    if indicator in section_lower:
+                        found_in_preferred = True
+                        break
+                if found_in_preferred:
+                    break
+        
+        # Check if skill appears in required context
+        if not found_in_preferred:
+            for section in sections:
+                section_lower = section.lower()
+                if skill_lower in section_lower:
+                    for indicator in required_indicators:
+                        if indicator in section_lower:
+                            found_in_required = True
+                            break
+                    if found_in_required:
+                        break
+        
+        # Categorize skill
+        if found_in_preferred:
+            preferred_skills.append(skill)
+        elif found_in_required:
+            required_skills.append(skill)
+        else:
+            # Default: add to required skills
+            required_skills.append(skill)
+    
+    # If we have too many skills, split them evenly
+    max_skills_per_category = 10
+    if len(required_skills) > max_skills_per_category:
+        # Move excess to preferred
+        excess = required_skills[max_skills_per_category:]
+        required_skills = required_skills[:max_skills_per_category]
+        preferred_skills.extend(excess)
+    
+    if len(preferred_skills) > max_skills_per_category:
+        preferred_skills = preferred_skills[:max_skills_per_category]
+    
+    # FALLBACK: If no skills found at all, extract from title and provide defaults
+    if not found_skills:
+        # Extract basic skills from job title
+        title_skills = extract_skills_from_title(title)
+        found_skills.extend(title_skills)
+        
+        # If still no skills, provide category-based default skills
+        if not found_skills:
+            default_skills = get_default_skills_for_sports_jobs()
+            found_skills.extend(default_skills)
+    
+    # Ensure we always have at least some skills for both categories
+    if not required_skills and not preferred_skills:
+        # Split found skills between required and preferred
+        mid_point = max(1, len(found_skills) // 2)
+        required_skills = found_skills[:mid_point]
+        preferred_skills = found_skills[mid_point:] if len(found_skills) > 1 else []
+        
+        # If we still don't have preferred skills, create some
+        if not preferred_skills and required_skills:
+            # Move some required skills to preferred or add generic ones
+            if len(required_skills) > 3:
+                preferred_skills = required_skills[-2:]  # Take last 2
+                required_skills = required_skills[:-2]
+            else:
+                # Add generic soft skills as preferred
+                preferred_skills = ['Communication', 'Teamwork', 'Customer Service']
+    
+    # Ensure both categories have at least 1 skill
+    if not required_skills:
+        required_skills = ['Communication', 'Teamwork']
+    if not preferred_skills:
+        preferred_skills = ['Leadership', 'Problem Solving']
+    
+    # Convert to comma-separated strings within model limits (200 chars)
+    def join_with_limit(skills_list, max_len=190):
+        result = []
+        current_length = 0
+        for skill in skills_list:
+            # +2 for ", " separator
+            if current_length + len(skill) + 2 <= max_len:
+                result.append(skill)
+                current_length += len(skill) + 2
+            else:
+                break
+        return ", ".join(result)
+    
+    required_str = join_with_limit(required_skills)
+    preferred_str = join_with_limit(preferred_skills)
+    
+    # Final safety check - ensure both are non-empty
+    if not required_str:
+        required_str = "Communication, Teamwork"
+    if not preferred_str:
+        preferred_str = "Leadership, Problem Solving"
+    
+    return required_str, preferred_str
+
+
+def extract_skills_from_title(title: str) -> list:
+    """Extract skills directly from job title."""
+    if not title:
+        return []
+    
+    title_lower = title.lower()
+    title_skills = []
+    
+    # Common title-based skill mappings for sports industry
+    title_skill_map = {
+        'coach': ['Coaching', 'Sports Training', 'Team Leadership'],
+        'trainer': ['Personal Training', 'Fitness Training', 'Exercise Programs'],
+        'manager': ['Management', 'Leadership', 'Team Management'],
+        'coordinator': ['Coordination', 'Event Management', 'Administration'],
+        'instructor': ['Instruction', 'Teaching', 'Group Leadership'],
+        'developer': ['Development', 'Program Development', 'Strategic Planning'],
+        'analyst': ['Analysis', 'Data Analysis', 'Report Writing'],
+        'specialist': ['Specialized Knowledge', 'Expertise', 'Consultation'],
+        'assistant': ['Administration', 'Support', 'Organization'],
+        'administrator': ['Administration', 'Organization', 'Communication'],
+        'officer': ['Administration', 'Compliance', 'Communication'],
+        'consultant': ['Consultation', 'Advisory', 'Expertise'],
+        'supervisor': ['Supervision', 'Leadership', 'Team Management']
+    }
+    
+    for key_word, skills in title_skill_map.items():
+        if key_word in title_lower:
+            title_skills.extend(skills)
+    
+    # Remove duplicates
+    return list(dict.fromkeys(title_skills))
+
+
+def get_default_skills_for_sports_jobs() -> list:
+    """Provide default skills for sports/fitness industry jobs."""
+    return [
+        'Communication', 'Teamwork', 'Customer Service', 'Leadership',
+        'Problem Solving', 'Time Management', 'Organization', 'Reliability'
+    ]
+
+
+def get_skill_variations(skill: str) -> list:
+    """Get common variations of a skill for better matching."""
+    variations = []
+    
+    # Common skill variations mapping
+    skill_variations_map = {
+        'communication': ['communicate', 'communicating', 'communications'],
+        'leadership': ['lead', 'leading', 'leader', 'management'],
+        'teamwork': ['team work', 'team player', 'collaborative', 'collaboration'],
+        'customer service': ['client service', 'customer support', 'client support'],
+        'problem solving': ['problem-solving', 'troubleshooting', 'analytical'],
+        'time management': ['time-management', 'prioritization', 'organizing'],
+        'project management': ['project-management', 'project coordination'],
+        'microsoft office': ['ms office', 'office suite', 'word excel powerpoint'],
+        'social media': ['social-media', 'facebook', 'instagram', 'linkedin'],
+        'first aid': ['first-aid', 'cpr', 'emergency response'],
+        'coaching': ['coach', 'mentoring', 'training'],
+        'fitness training': ['fitness', 'training', 'exercise'],
+        'sports coaching': ['sports', 'coaching', 'athletic'],
+        'personal training': ['pt', 'one-on-one training', 'individual training'],
+        'group fitness': ['group training', 'class instruction', 'group exercise'],
+        'cert iii': ['certificate 3', 'cert 3', 'certificate iii'],
+        'cert iv': ['certificate 4', 'cert 4', 'certificate iv'],
+        'bachelor': ['degree', 'undergraduate', 'bachelors'],
+        'masters': ['master', 'postgraduate', 'masters degree']
+    }
+    
+    # Get specific variations for this skill
+    if skill in skill_variations_map:
+        variations.extend(skill_variations_map[skill])
+    
+    # Add common suffix/prefix variations
+    base_variations = [
+        skill + 's',  # plural
+        skill + 'ing',  # gerund
+        skill.replace(' ', '-'),  # hyphenated
+        skill.replace(' ', ''),  # no space
+    ]
+    
+    variations.extend(base_variations)
+    
+    # Remove duplicates and empty strings
+    return [v for v in list(dict.fromkeys(variations)) if v and v != skill]
+
+
+def parse_closing_date(date_text: str) -> str:
+    """
+    Parse various closing date formats and return a normalized string.
+    """
+    if not date_text:
+        return ""
+    
+    # Clean the text
+    text = date_text.strip().lower()
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove common prefixes
+    text = re.sub(r'^(closing|closes|expires|deadline|due|by):?\s*', '', text)
+    text = re.sub(r'^(on|at)\s+', '', text)
+    
+    # Try to extract date patterns
+    date_patterns = [
+        r'(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{4})',  # DD/MM/YYYY or MM/DD/YYYY
+        r'(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{4})',  # DD-MM-YYYY
+        r'(\d{1,2})\s+(\w+)\s+(\d{4})',  # DD Month YYYY
+        r'(\w+)\s+(\d{1,2}),?\s+(\d{4})',  # Month DD, YYYY
+        r'(\d{4})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})',  # YYYY-MM-DD
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    
+    # Look for relative dates
+    if 'today' in text:
+        return 'Today'
+    elif 'tomorrow' in text:
+        return 'Tomorrow'
+    elif 'week' in text:
+        if 'next week' in text:
+            return 'Next week'
+        elif 'this week' in text:
+            return 'This week'
+        else:
+            return text.title()
+    elif 'month' in text:
+        return text.title()
+    elif 'ongoing' in text or 'permanent' in text:
+        return 'Ongoing'
+    
+    # Return cleaned text if no specific pattern matched
+    return text.title() if text else ""
+
+
+def convert_text_to_html(text: str) -> str:
+    """
+    Convert plain text description to basic HTML format.
+    """
+    if not text:
+        return ""
+    
+    # Start with the original text
+    html_lines = []
+    lines = text.split('\n')
+    
+    current_paragraph = []
+    
+    for line in lines:
+        line = line.strip()
+        
+        if not line:
+            # Empty line - end current paragraph if any
+            if current_paragraph:
+                html_lines.append('<p>' + ' '.join(current_paragraph) + '</p>')
+                current_paragraph = []
+        elif line.startswith('•') or line.startswith('-') or line.startswith('*'):
+            # Bullet point - end current paragraph and start list if needed
+            if current_paragraph:
+                html_lines.append('<p>' + ' '.join(current_paragraph) + '</p>')
+                current_paragraph = []
+            
+            # Clean bullet point
+            clean_line = re.sub(r'^[•\-\*]\s*', '', line)
+            
+            # Check if we need to start a new list
+            if not html_lines or not html_lines[-1].startswith('<ul>'):
+                html_lines.append('<ul>')
+            elif html_lines[-1] == '</ul>':
+                html_lines.pop()  # Remove the closing tag
+            
+            html_lines.append(f'<li>{clean_line}</li>')
+            
+            # Check if next line is also a bullet or if this is the last line
+            if lines.index(line) == len(lines) - 1:
+                html_lines.append('</ul>')
+        elif re.match(r'^\d+\.\s+', line):
+            # Numbered list
+            if current_paragraph:
+                html_lines.append('<p>' + ' '.join(current_paragraph) + '</p>')
+                current_paragraph = []
+            
+            clean_line = re.sub(r'^\d+\.\s*', '', line)
+            
+            if not html_lines or not html_lines[-1].startswith('<ol>'):
+                html_lines.append('<ol>')
+            elif html_lines[-1] == '</ol>':
+                html_lines.pop()
+            
+            html_lines.append(f'<li>{clean_line}</li>')
+            
+            if lines.index(line) == len(lines) - 1:
+                html_lines.append('</ol>')
+        elif line.isupper() and len(line) > 5:
+            # All caps line - treat as heading
+            if current_paragraph:
+                html_lines.append('<p>' + ' '.join(current_paragraph) + '</p>')
+                current_paragraph = []
+            html_lines.append(f'<h3>{line.title()}</h3>')
+        else:
+            # Regular text line - add to current paragraph
+            current_paragraph.append(line)
+    
+    # Close any remaining paragraph
+    if current_paragraph:
+        html_lines.append('<p>' + ' '.join(current_paragraph) + '</p>')
+    
+    # Close any open lists
+    if html_lines and html_lines[-1].startswith('<li>'):
+        if '<ul>' in ''.join(html_lines):
+            html_lines.append('</ul>')
+        elif '<ol>' in ''.join(html_lines):
+            html_lines.append('</ol>')
+    
+    return '\n'.join(html_lines)
+
+
 def ensure_user():
     User = get_user_model()
     user = User.objects.filter(is_superuser=True).first() or User.objects.first()
@@ -131,7 +570,7 @@ def get_or_create_location(text: str) -> Optional[Location]:
 def extract_detail_fields(html: str):
     soup = BeautifulSoup(html, "html.parser")
 
-    def extract_clean_description() -> str:
+    def extract_clean_description() -> Tuple[str, str]:  # Returns (text, html)
         # First remove unwanted sections entirely
         for unwanted in soup.select('form, .application-form, nav, header, footer, .sidebar, .related-searches, .learning-recommendations'):
             unwanted.decompose()
@@ -182,8 +621,10 @@ def extract_detail_fields(html: str):
         # Join and clean the description
         if description_parts:
             full_desc = '\n\n'.join(description_parts)
-            return clean_job_description(full_desc)
-        return ""
+            clean_text = clean_job_description(full_desc)
+            clean_html = convert_text_to_html(clean_text)
+            return clean_text, clean_html
+        return "", ""
 
     def clean_job_description(text: str) -> str:
         if not text:
@@ -247,7 +688,7 @@ def extract_detail_fields(html: str):
         return result
 
     # Extract the clean description
-    desc = extract_clean_description()
+    desc_text, desc_html = extract_clean_description()
 
     # Job type
     jt_text = ""
@@ -261,7 +702,68 @@ def extract_detail_fields(html: str):
     if sal_node:
         sal_text = str(sal_node)
     
-    return desc, jt_text, sal_text
+    # Extract closing date from detail page
+    closing_date = ""
+    closing_selectors = [
+        ".closing-date", ".job-closing", ".expires", ".deadline",
+        "[class*='closing']", "[class*='expires']", "[class*='deadline']",
+        "[id*='closing']", "[id*='expires']"
+    ]
+    
+    for selector in closing_selectors:
+        try:
+            closing_elem = soup.select_one(selector)
+            if closing_elem:
+                closing_text = closing_elem.get_text(strip=True)
+                if closing_text and len(closing_text) > 3:
+                    closing_date = parse_closing_date(closing_text)
+                    break
+        except Exception:
+            continue
+    
+    # If no specific closing date found, look in the body text
+    if not closing_date:
+        body_text = soup.get_text()
+        closing_patterns = [
+            r'clos(?:ing|es?)\s+(?:date?)?:?\s*([^\n]+)',
+            r'deadline:?\s*([^\n]+)',
+            r'expires?:?\s*([^\n]+)',
+            r'applications?\s+close:?\s*([^\n]+)',
+            r'due\s+(?:date?)?:?\s*([^\n]+)'
+        ]
+        
+        for pattern in closing_patterns:
+            match = re.search(pattern, body_text, re.I)
+            if match:
+                date_text = match.group(1).strip()
+                if len(date_text) > 3:
+                    closing_date = parse_closing_date(date_text)
+                    break
+    
+    # Extract company logo URL from detail page
+    company_logo_url = ""
+    logo_selectors = [
+        ".company-logo img", ".employer-logo img", ".logo img",
+        "img[src*='logo']", "img[alt*='logo']", "img[class*='logo']",
+        ".company img", ".employer img"
+    ]
+    
+    for selector in logo_selectors:
+        try:
+            logo_elem = soup.select_one(selector)
+            if logo_elem and logo_elem.get('src'):
+                src = logo_elem.get('src')
+                if src and ('logo' in src.lower() or 'company' in src.lower()):
+                    # Make absolute URL if relative
+                    if src.startswith('/'):
+                        company_logo_url = f"https://www.sportspeople.com.au{src}"
+                    elif src.startswith('http'):
+                        company_logo_url = src
+                    break
+        except Exception:
+            continue
+    
+    return desc_text, desc_html, jt_text, sal_text, closing_date, company_logo_url
 
 
 def scrape_sportspeople(max_jobs: int = 60) -> None:
@@ -317,24 +819,58 @@ def scrape_sportspeople(max_jobs: int = 60) -> None:
                     SALARY_FEATURE_SELECTOR).count() else ""
                 salary_text = (salary_text or "").strip()
 
+                # Extract closing date from job card
+                closing_date_card = ""
+                try:
+                    closing_elem = card.locator(CLOSING_DATE_SELECTOR).first
+                    if closing_elem.count() > 0:
+                        closing_text = closing_elem.text_content(timeout=2000) or ""
+                        closing_date_card = parse_closing_date(closing_text.strip())
+                except Exception:
+                    pass
+
+                # Extract company logo from job card
+                company_logo_card = ""
+                try:
+                    logo_elem = card.locator(COMPANY_LOGO_SELECTOR).first
+                    if logo_elem.count() > 0:
+                        logo_src = logo_elem.get_attribute("src", timeout=2000) or ""
+                        if logo_src:
+                            if logo_src.startswith("/"):
+                                company_logo_card = f"https://www.sportspeople.com.au{logo_src}"
+                            elif logo_src.startswith("http"):
+                                company_logo_card = logo_src
+                except Exception:
+                    pass
+
                 # Fetch job detail page via HTTP request (faster than UI navigation)
                 description = ""
+                description_html = ""
                 jt_text = ""
                 salary_detail_text = ""
+                closing_date_detail = ""
+                company_logo_detail = ""
                 try:
                     resp = context.request.get(href, timeout=45000)
                     if resp.ok:
                         html = resp.text()
-                        description, jt_text, salary_detail_text = extract_detail_fields(html)
+                        description, description_html, jt_text, salary_detail_text, closing_date_detail, company_logo_detail = extract_detail_fields(html)
                 except Exception:
                     pass
                 job_type = map_job_type(jt_text)
                 salary_combined = salary_detail_text or salary_text
                 work_mode = detect_work_mode(loc_text)
 
+                # Use detail page data if available, otherwise fall back to card data
+                final_closing_date = closing_date_detail or closing_date_card
+                final_company_logo = company_logo_detail or company_logo_card
+
                 # External id from job URL like /jobs/85552-learning-designer-...
                 m = re.search(r"/jobs/(\d+)-", href)
                 external_id = m.group(1) if m else ""
+
+                # Extract skills from description
+                skills, preferred_skills = extract_skills_from_description(description, title)
 
                 scraped_jobs.append({
                     "title": title[:200],
@@ -342,10 +878,15 @@ def scrape_sportspeople(max_jobs: int = 60) -> None:
                     "loc_text": loc_text[:100],
                     "href": href,
                     "description": description,
+                    "description_html": description_html,
                     "job_type": job_type,
                     "salary_text": salary_combined,
                     "work_mode": work_mode,
                     "external_id": external_id,
+                    "closing_date": final_closing_date,
+                    "company_logo_url": final_company_logo,
+                    "skills": skills,
+                    "preferred_skills": preferred_skills,
                 })
 
                 processed += 1
@@ -412,10 +953,15 @@ def scrape_sportspeople(max_jobs: int = 60) -> None:
         sal_min, sal_max, currency, salary_type = parse_salary_text(item["salary_text"])
         category = JobCategorizationService.categorize_job(item["title"], item["description"])
         tags = ", ".join(JobCategorizationService.get_job_keywords(item["title"], item["description"]))
+        
+        # Update company logo if we have one
+        if item.get("company_logo_url") and company:
+            company.logo = item["company_logo_url"]
+            company.save()
 
         JobPosting.objects.create(
             title=(item["title"] or "")[:200],
-            description=item["description"] or "",
+            description=item["description_html"] or item["description"] or "",  # Use HTML description
             company=company,
             posted_by=user,
             location=location,
@@ -433,8 +979,13 @@ def scrape_sportspeople(max_jobs: int = 60) -> None:
             posted_ago="",
             date_posted=None,
             tags=tags,
+            job_closing_date=item.get("closing_date", ""),
+            skills=item.get("skills", ""),
+            preferred_skills=item.get("preferred_skills", ""),
             additional_info={
                 "source_page": "jobs list",
+                "original_text_description": item["description"],
+                "company_logo_url": item.get("company_logo_url", ""),
             },
         )
         saved += 1

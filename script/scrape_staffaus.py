@@ -3,6 +3,7 @@ import sys
 import re
 from datetime import datetime
 from decimal import Decimal
+from typing import Tuple
 import django
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -63,14 +64,19 @@ def get_or_create_scraper_user():
     return user
 
 
-def get_company() -> Company:
-    company, _ = Company.objects.get_or_create(
+def get_or_create_company(logo_url: str = "") -> Company:
+    company, created = Company.objects.get_or_create(
         name="Staff Australia",
         defaults={
             "website": "https://staffaus.com.au",
             "description": "Staff Australia recruitment",
+            "logo": logo_url,
         },
     )
+    # Update logo if company exists but logo is empty and we have a new one
+    if not created and logo_url and not company.logo:
+        company.logo = logo_url
+        company.save(update_fields=['logo'])
     return company
 
 
@@ -140,7 +146,7 @@ def parse_location_name(text: str):
 
 
 def upsert_job(data: dict):
-    company = get_company()
+    company = get_or_create_company(data.get('company_logo', ''))
     user = get_or_create_scraper_user()
 
     # Location
@@ -179,6 +185,8 @@ def upsert_job(data: dict):
             "date_posted": data.get("date_posted"),
             "work_mode": data.get("work_mode", ""),
             "tags": ", ".join(keywords) if keywords else "",
+            "skills": data.get("skills", ""),
+            "preferred_skills": data.get("preferred_skills", ""),
         },
     )
 
@@ -199,6 +207,8 @@ def upsert_job(data: dict):
         obj.date_posted = data.get("date_posted", obj.date_posted)
         obj.work_mode = data.get("work_mode", obj.work_mode)
         obj.tags = ", ".join(keywords) if keywords else obj.tags
+        obj.skills = data.get("skills", obj.skills)
+        obj.preferred_skills = data.get("preferred_skills", obj.preferred_skills)
         obj.save()
 
     return obj, created
@@ -303,6 +313,48 @@ def extract_description_from_heading(soup: BeautifulSoup) -> str:
     return text.strip()
 
 
+def extract_description_html_from_heading(soup: BeautifulSoup) -> str:
+    """Extract HTML description preserving formatting from the 'Job Description' section."""
+    heading = None
+    for tag in soup.find_all(["h1", "h2", "h3", "strong"]):
+        if tag.get_text(strip=True).lower().startswith("job description"):
+            heading = tag
+            break
+    if not heading:
+        return ""
+
+    # Collect HTML elements after the heading
+    elements = []
+    stop_tags = {"h1", "h2"}
+    stop_texts = {"similar jobs", "details", "employers", "job seekers"}
+
+    for sib in heading.find_all_next():
+        if sib is heading:
+            continue
+        
+        txt = sib.get_text(" ", strip=True)
+        if not txt:
+            continue
+            
+        # Stop at next major section
+        if (sib.name in stop_tags and sib is not heading) or any(t in txt.lower() for t in stop_texts):
+            break
+            
+        # Include relevant content elements
+        if sib.name in {"p", "ul", "ol", "li", "div", "strong", "em", "b", "i"}:
+            elements.append(str(sib))
+        elif sib.name in {"span"} and len(txt) > 20:
+            # Convert long spans to paragraphs
+            elements.append(f"<p>{txt}</p>")
+        
+        # Cap runaway capture
+        if len("".join(elements)) > 8000:
+            break
+
+    html_content = "\n".join(elements)
+    return html_content.strip()
+
+
 def dedupe_description(text: str) -> str:
     """Remove duplicate lines and collapse repeated headings while keeping order."""
     if not text:
@@ -351,7 +403,422 @@ def normalize_spacing(text: str) -> str:
     return "\n".join(out).strip()
 
 
-def extract_job_from_detail(html: str, url: str):
+def sanitize_description_html(html: str) -> str:
+    """Return clean, safe HTML from raw description content while preserving formatting."""
+    if not html:
+        return ""
+    
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Remove unwanted elements entirely
+        unwanted_selectors = [
+            "script", "style", "form", "nav", "header", "footer",
+            ".sidebar", ".related", ".share", ".apply", ".application",
+            ".newsletter", ".footer", ".navigation"
+        ]
+        
+        for sel in unwanted_selectors:
+            for n in soup.select(sel):
+                n.decompose()
+        
+        # Be more selective about what we remove - preserve job content
+        elements_to_remove = []
+        
+        for element in soup.find_all(['p', 'div', 'span', 'ul', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            element_text = element.get_text(strip=True).lower()
+            
+            # Only remove obvious navigation/footer content, NOT job-related content
+            unwanted_patterns = [
+                'privacy policy', 'terms of use', 'diversity and inclusion', 'human rights',
+                'sign up to our newsletter', 'register for job alerts', 'follow us',
+                'social media', 'newsletter', 'subscribe', 'copyright', '© 20',
+                'all rights reserved'
+            ]
+            
+            # Remove ONLY if it's clearly navigation/footer AND short
+            if (any(pattern in element_text for pattern in unwanted_patterns) and 
+                len(element_text) < 150):
+                elements_to_remove.append(element)
+                continue
+            
+            # Remove very short navigation elements but preserve job content
+            if (len(element_text) < 5 and element.name not in ['li', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                elements_to_remove.append(element)
+        
+        for element in elements_to_remove:
+            try:
+                element.decompose()
+            except:
+                pass
+        
+        # Clean up structure and keep only safe tags
+        allowed_tags = {
+            "p", "ul", "ol", "li", "strong", "em", "b", "i",
+            "br", "h1", "h2", "h3", "h4", "h5", "h6", "a"
+        }
+        
+        # Convert divs with content to paragraphs
+        for div in soup.find_all('div'):
+            div_text = div.get_text(strip=True)
+            if div_text and len(div_text) > 10 and not div.find(['p', 'ul', 'ol', 'h1', 'h2', 'h3']):
+                div.name = 'p'
+        
+        # Remove disallowed tags but keep their content
+        for tag in list(soup.find_all(True)):
+            if tag.name not in allowed_tags:
+                tag.unwrap()
+                continue
+            
+            # Clean all attributes except href for links
+            attrs = dict(tag.attrs)
+            for attr in attrs:
+                if tag.name == "a" and attr == "href":
+                    continue
+                del tag.attrs[attr]
+        
+        # Normalize heading levels to h3
+        for h in soup.find_all(['h1', 'h2', 'h4', 'h5', 'h6']):
+            h.name = 'h3'
+        
+        # Get cleaned HTML
+        html_clean = str(soup)
+        
+        # Remove html/body wrappers
+        html_clean = re.sub(r'^\s*<(?:html|body)[^>]*>|</(?:html|body)>\s*$', '', html_clean, flags=re.I)
+        
+        # Clean up whitespace
+        html_clean = re.sub(r'\n{3,}', '\n\n', html_clean)
+        html_clean = re.sub(r'>\s+<', '><', html_clean)
+        
+        # Remove empty tags
+        html_clean = re.sub(r'<(\w+)[^>]*>\s*</\1>', '', html_clean)
+        
+        # If result is empty or too short, return some basic content
+        if not html_clean.strip() or len(html_clean.strip()) < 50:
+            return "<p>Job description content not available</p>"
+        
+        return html_clean.strip()
+        
+    except Exception as e:
+        logger.warning(f"Error sanitizing HTML: {e}")
+        # Fallback: convert to text and wrap in paragraphs
+        if html:
+            text = BeautifulSoup(html, "html.parser").get_text()
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if lines:
+                return '\n'.join(f'<p>{ln}</p>' for ln in lines[:10])  # Limit to first 10 lines
+        return "<p>Job description content not available</p>"
+
+
+def extract_skills_from_description(description: str, title: str = "") -> Tuple[str, str]:
+    """Extract skills and preferred skills from job description and title."""
+    if not description:
+        return "", ""
+    
+    # Convert HTML to text for analysis
+    text = re.sub(r'<[^>]+>', ' ', description).lower()
+    text = re.sub(r'\s+', ' ', text).strip()
+    title_text = title.lower() if title else ""
+    
+    # Comprehensive skills database for Australia
+    technical_skills = [
+        # Office & Business Software
+        'microsoft office', 'excel', 'word', 'powerpoint', 'outlook', 'teams', 'sharepoint',
+        'google workspace', 'gmail', 'google drive', 'google docs', 'google sheets',
+        'adobe', 'pdf', 'photoshop', 'canva', 'crm', 'salesforce', 'hubspot',
+        
+        # Programming & Tech
+        'python', 'java', 'javascript', 'html', 'css', 'sql', 'database', 'mysql', 'postgresql',
+        'web development', 'software development', 'programming', 'coding', 'git', 'github',
+        'aws', 'azure', 'cloud computing', 'api', 'rest api', 'json', 'xml',
+        
+        # Industry Specific
+        'healthcare', 'nursing', 'patient care', 'medical records', 'clinical', 'pharmacy',
+        'construction', 'building', 'safety', 'whs', 'occupational health', 'first aid', 'cpr',
+        'engineering', 'mechanical', 'electrical', 'civil', 'autocad', 'solidworks',
+        'finance', 'accounting', 'bookkeeping', 'payroll', 'tax', 'financial analysis',
+        'retail', 'customer service', 'sales', 'pos', 'inventory', 'merchandising',
+        'logistics', 'supply chain', 'warehouse', 'forklift', 'transport', 'delivery',
+        'education', 'teaching', 'training', 'curriculum', 'lesson planning',
+        'hospitality', 'food service', 'cooking', 'kitchen', 'rsa', 'food safety',
+        
+        # Business Skills
+        'project management', 'agile', 'scrum', 'lean', 'six sigma', 'process improvement',
+        'data analysis', 'reporting', 'analytics', 'business intelligence', 'tableau', 'power bi',
+        'marketing', 'digital marketing', 'social media', 'seo', 'content marketing',
+        'human resources', 'recruitment', 'payroll', 'performance management',
+        
+        # Certifications & Qualifications
+        'certificate iii', 'certificate iv', 'cert iii', 'cert iv', 'diploma', 'bachelor',
+        'masters', 'phd', 'professional development', 'continuing education',
+        'white card', 'blue card', 'working with children', 'police check',
+        'drivers license', 'forklift license', 'crane license', 'trade license'
+    ]
+    
+    soft_skills = [
+        'communication', 'verbal communication', 'written communication', 'listening',
+        'teamwork', 'collaboration', 'team player', 'interpersonal', 'relationship building',
+        'leadership', 'management', 'supervision', 'mentoring', 'coaching',
+        'problem solving', 'analytical thinking', 'critical thinking', 'decision making',
+        'time management', 'organisation', 'planning', 'prioritisation', 'multitasking',
+        'adaptability', 'flexibility', 'resilience', 'stress management',
+        'attention to detail', 'accuracy', 'quality', 'thoroughness',
+        'creativity', 'innovation', 'initiative', 'proactive', 'self-motivated',
+        'customer focus', 'client service', 'stakeholder management',
+        'negotiation', 'conflict resolution', 'influencing', 'persuasion',
+        'cultural awareness', 'diversity', 'inclusion', 'empathy'
+    ]
+    
+    all_skills = technical_skills + soft_skills
+    found_skills = []
+    
+    # Find skills in text with pattern matching
+    for skill in all_skills:
+        skill_lower = skill.lower()
+        
+        # Exact word boundary match
+        pattern = r'\b' + re.escape(skill_lower) + r'\b'
+        if re.search(pattern, text) or re.search(pattern, title_text):
+            found_skills.append(skill.title())
+            continue
+        
+        # Partial match for compound skills
+        if ' ' in skill_lower:
+            skill_parts = skill_lower.split()
+            if all(part in text or part in title_text for part in skill_parts):
+                found_skills.append(skill.title())
+    
+    # Remove duplicates while preserving order
+    found_skills = list(dict.fromkeys(found_skills))
+    
+    # Split skills between required and preferred based on context
+    required_skills = []
+    preferred_skills = []
+    
+    # Look for sections that indicate required vs preferred
+    required_indicators = [
+        'essential', 'required', 'must have', 'mandatory', 'necessary',
+        'minimum requirements', 'key requirements', 'you will need',
+        'successful candidate will', 'candidate must', 'experience in'
+    ]
+    
+    preferred_indicators = [
+        'preferred', 'desirable', 'advantageous', 'beneficial', 'nice to have',
+        'would be an advantage', 'highly regarded', 'valued', 'plus',
+        'bonus', 'additional', 'ideal candidate', 'would be great'
+    ]
+    
+    # Analyze context for each skill
+    for skill in found_skills:
+        skill_lower = skill.lower()
+        skill_context = ""
+        
+        # Find sentences containing the skill
+        sentences = re.split(r'[.!?]+', text)
+        for sentence in sentences:
+            if skill_lower in sentence:
+                skill_context += sentence + " "
+        
+        # Determine if it's required or preferred based on context
+        is_required = any(indicator in skill_context for indicator in required_indicators)
+        is_preferred = any(indicator in skill_context for indicator in preferred_indicators)
+        
+        if is_required and not is_preferred:
+            required_skills.append(skill)
+        elif is_preferred and not is_required:
+            preferred_skills.append(skill)
+        else:
+            # Default to required if unclear
+            required_skills.append(skill)
+    
+    # Ensure we have some skills, add defaults if none found
+    if not required_skills and not preferred_skills:
+        required_skills = ['Communication', 'Teamwork', 'Problem Solving', 'Time Management']
+        preferred_skills = ['Leadership', 'Initiative', 'Attention To Detail', 'Customer Focus']
+    
+    # If we only have one category, create the other from it
+    if required_skills and not preferred_skills:
+        preferred_skills = required_skills[-2:] if len(required_skills) > 2 else required_skills
+    elif preferred_skills and not required_skills:
+        required_skills = preferred_skills[:3] if len(preferred_skills) > 3 else preferred_skills
+    
+    # Limit to reasonable numbers and ensure uniqueness
+    required_skills = list(dict.fromkeys(required_skills))[:8]
+    preferred_skills = list(dict.fromkeys(preferred_skills))[:8]
+    
+    return ', '.join(required_skills), ', '.join(preferred_skills)
+
+
+def extract_company_logo(page) -> str:
+    """Extract company logo URL from the page."""
+    try:
+        # Try multiple selectors for logo
+        logo_selectors = [
+            'img[alt*="Staff Australia" i]',
+            'img[src*="logo" i]',
+            '.logo img',
+            '.header img',
+            '.brand img',
+            'img[alt*="logo" i]'
+        ]
+        
+        for selector in logo_selectors:
+            try:
+                logo_element = page.locator(selector).first
+                if logo_element.count() > 0:
+                    logo_url = logo_element.get_attribute('src')
+                    if logo_url:
+                        # Convert relative URLs to absolute
+                        if logo_url.startswith('//'):
+                            logo_url = 'https:' + logo_url
+                        elif logo_url.startswith('/'):
+                            logo_url = 'https://staffaus.com.au' + logo_url
+                        elif not logo_url.startswith('http'):
+                            logo_url = 'https://staffaus.com.au/' + logo_url
+                        
+                        # Validate it's a reasonable logo URL
+                        if any(ext in logo_url.lower() for ext in ['.png', '.jpg', '.jpeg', '.svg', '.gif']):
+                            return logo_url
+            except Exception:
+                continue
+        
+        # Fallback logo
+        return 'https://staffaus.com.au/wp-content/uploads/2020/07/Staff-Australia-Logo.png'
+        
+    except Exception as e:
+        logger.warning(f"Error extracting company logo: {e}")
+        return 'https://staffaus.com.au/wp-content/uploads/2020/07/Staff-Australia-Logo.png'
+
+
+def extract_posting_date(soup: BeautifulSoup, page) -> datetime:
+    """Extract job posting date from the page."""
+    try:
+        # Try to find date in common locations
+        date_selectors = [
+            '.job-meta .date',
+            '.posted-date',
+            '.job-posted',
+            '.meta-date',
+            'time[datetime]',
+            '.entry-meta .date'
+        ]
+        
+        # First try with playwright selectors
+        try:
+            for selector in date_selectors:
+                try:
+                    element = page.locator(selector).first
+                    if element.count() > 0:
+                        date_text = element.inner_text().strip()
+                        if date_text:
+                            parsed_date = parse_date_text(date_text)
+                            if parsed_date:
+                                return parsed_date
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        # Then try with BeautifulSoup
+        for selector in date_selectors:
+            try:
+                elements = soup.select(selector)
+                for element in elements:
+                    date_text = element.get_text(strip=True)
+                    if date_text:
+                        parsed_date = parse_date_text(date_text)
+                        if parsed_date:
+                            return parsed_date
+                    
+                    # Check for datetime attribute
+                    datetime_attr = element.get('datetime')
+                    if datetime_attr:
+                        parsed_date = parse_date_text(datetime_attr)
+                        if parsed_date:
+                            return parsed_date
+            except Exception:
+                continue
+        
+        # Look for date patterns in text
+        date_patterns = [
+            r'posted\s+(\d{1,2}\s+\w+\s+\d{4})',
+            r'(\d{1,2}\s+\w+\s+\d{4})',
+            r'(\d{1,2}[-/]\d{1,2}[-/]\d{4})',
+            r'(\w+\s+\d{1,2},?\s+\d{4})'
+        ]
+        
+        page_text = soup.get_text()
+        for pattern in date_patterns:
+            matches = re.findall(pattern, page_text, re.IGNORECASE)
+            for match in matches:
+                parsed_date = parse_date_text(match)
+                if parsed_date:
+                    return parsed_date
+        
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Error extracting posting date: {e}")
+        return None
+
+
+def parse_date_text(date_text: str) -> datetime:
+    """Parse various date formats into datetime object."""
+    if not date_text:
+        return None
+    
+    date_text = date_text.strip()
+    
+    try:
+        # Handle relative dates
+        if 'ago' in date_text.lower():
+            from datetime import timedelta
+            now = datetime.now()
+            
+            if 'day' in date_text:
+                days = re.search(r'(\d+)', date_text)
+                if days:
+                    return now - timedelta(days=int(days.group(1)))
+            elif 'week' in date_text:
+                weeks = re.search(r'(\d+)', date_text)
+                if weeks:
+                    return now - timedelta(weeks=int(weeks.group(1)))
+            elif 'month' in date_text:
+                months = re.search(r'(\d+)', date_text)
+                if months:
+                    return now - timedelta(days=int(months.group(1)) * 30)
+            elif 'hour' in date_text:
+                hours = re.search(r'(\d+)', date_text)
+                if hours:
+                    return now - timedelta(hours=int(hours.group(1)))
+        
+        # Handle various date formats
+        date_formats = [
+            '%d %B %Y',          # 17 September 2025
+            '%B %d, %Y',         # September 17, 2025
+            '%d/%m/%Y',          # 17/09/2025
+            '%d-%m-%Y',          # 17-09-2025
+            '%Y-%m-%d',          # 2025-09-17
+            '%d %b %Y',          # 17 Sep 2025
+            '%b %d, %Y',         # Sep 17, 2025
+            '%Y-%m-%dT%H:%M:%S', # ISO format
+            '%Y-%m-%d %H:%M:%S'  # Standard datetime
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(date_text, fmt)
+            except ValueError:
+                continue
+        
+        return None
+        
+    except Exception:
+        return None
+
+
+def extract_job_from_detail(html: str, url: str, page=None):
     soup = BeautifulSoup(html, "html.parser")
 
     # Title
@@ -419,56 +886,140 @@ def extract_job_from_detail(html: str, url: str):
         elif re.search(r"Remote", text_blob, re.I):
             work_mode = "Remote"
 
-    # Description: prefer the block directly under the "Job Description" heading
-    description = extract_description_from_heading(soup)
+    # Extract COMPLETE job description content including all sections
+    description_html = ""
     
-    # If that fails, prefer content inside the main post content widget
-    content_selectors = [
-        ".elementor-widget-theme-post-content",
-        ".entry-content",
-        ".elementor-widget-text-editor",
-        "article .elementor-widget-text-editor",
+    # Strategy 1: Look for the main content area that contains the full job description
+    main_content_selectors = [
+        ".elementor-widget-theme-post-content .elementor-widget-container",
+        ".entry-content .elementor-section",
+        ".post-content", 
+        "article .elementor-widget-text-editor .elementor-widget-container",
+        ".elementor-text-editor",
+        ".elementor-widget-container > div",
+        ".post-content .elementor-section",
+        "article .entry-content"
     ]
-    if not description:
-        containers = []
-        for sel in content_selectors:
-            containers.extend(soup.select(sel))
-
-        prioritized = [c for c in containers if "job description" in c.get_text(" ", strip=True).lower()]
-        if prioritized:
-            containers = prioritized + [c for c in containers if c not in prioritized]
-
-        for c in containers:
-            txt = extract_text_preserving_structure(c)
-            if len(txt) > len(description):
-                description = txt
-
-    # Fallback: stitch together paragraphs and bullet items
-    if not description:
-        temp_lines = []
-        for li in soup.find_all("li"):
-            t = li.get_text(" ", strip=True)
-            if t:
-                temp_lines.append(f"- {t}")
-        for p in soup.find_all("p"):
-            t = p.get_text(" ", strip=True)
-            if t and len(t) > 20:
-                temp_lines.append(t)
-        if temp_lines:
-            description = "\n\n".join(temp_lines)
-
-    description = clean_description_text(description)
-    description = dedupe_description(description)
-    description = normalize_spacing(description)
+    
+    # Try to find the container with the most comprehensive content
+    best_container = None
+    best_content_length = 0
+    
+    for selector in main_content_selectors:
+        containers = soup.select(selector)
+        for container in containers:
+            container_text = container.get_text(strip=True)
+            
+            # Look for containers that have substantial content AND key job description markers
+            job_indicators = [
+                'job description', 'forklift driver', 'hours:', 'key responsibilities', 
+                'about you', 'benefits', 'how to apply', 'why join', 'opportunity',
+                'warehouse', 'shift', 'experience', 'responsibilities', 'duties'
+            ]
+            
+            indicator_count = sum(1 for indicator in job_indicators if indicator in container_text.lower())
+            
+            # Prefer containers with more job indicators and substantial content
+            if (len(container_text) > 200 and indicator_count >= 2 and 
+                len(container_text) > best_content_length):
+                best_container = container
+                best_content_length = len(container_text)
+    
+    if best_container:
+        description_html = str(best_container)
+    
+    # Strategy 2: Comprehensive fallback - collect ALL relevant content sections
+    if not description_html:
+        # Collect ALL elements that could be part of the job description
+        job_elements = []
+        content_sections = []
+        
+        # First, try to find the main article or content container
+        article_containers = soup.find_all(['article', 'main', '.post', '.content'])
+        if not article_containers:
+            article_containers = [soup]  # Use entire page as fallback
+        
+        for container in article_containers:
+            # Look for ALL content elements, being more inclusive
+            for element in container.find_all(['p', 'ul', 'ol', 'li', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span']):
+                element_text = element.get_text(strip=True)
+                
+                # Skip very short content (but allow shorter headings)
+                if len(element_text) < 10 and element.name not in ['h2', 'h3', 'h4', 'h5', 'h6']:
+                    continue
+                
+                # Skip obvious navigation and footer content
+                skip_patterns = [
+                    'privacy policy', 'terms of use', 'job search', 'saved jobs',
+                    'staff australia today', 'call us on', 'visit www.', 'email us at',
+                    'follow us', 'social media', 'newsletter', 'subscribe',
+                    'copyright', '© 20', 'all rights reserved'
+                ]
+                
+                if any(skip_pattern in element_text.lower() for skip_pattern in skip_patterns):
+                    continue
+                
+                # Include content that's likely part of job description
+                # Be very inclusive - capture everything that could be relevant
+                job_keywords = [
+                    'forklift', 'driver', 'warehouse', 'opportunity', 'experience', 
+                    'duties', 'responsibilities', 'requirements', 'benefits', 'hours',
+                    'shifts', 'rates', 'training', 'location', 'successful', 'position', 
+                    'candidate', 'what\'s on offer', 'main duties', 'about you', 
+                    'key responsibilities', 'how to apply', 'why join', 'staff australia',
+                    'per hour', 'per annum', 'monday to friday', 'full time', 'contract',
+                    'immediate start', 'ongoing', 'permanent', 'apply', 'beverage',
+                    'operations', 'supply', 'reach', 'pallets', 'inventory', 'control',
+                    'kpi', 'licence', 'punctual', 'working rights', 'career', 'growth'
+                ]
+                
+                # Include if it contains job-related keywords OR is a heading/list item
+                if (any(keyword in element_text.lower() for keyword in job_keywords) or 
+                    element.name in ['h2', 'h3', 'h4', 'h5', 'h6', 'li'] or
+                    len(element_text) > 50):  # Include longer text blocks
+                    
+                    # Avoid duplicating the same content
+                    element_html = str(element)
+                    if element_html not in job_elements:
+                        job_elements.append(element_html)
+        
+        if job_elements:
+            description_html = "\n".join(job_elements)
+    
+    # Final fallback: Use the heading-based approach
+    if not description_html:
+        description_html = extract_description_html_from_heading(soup)
+    
+    # Sanitize the HTML description
+    description_clean = sanitize_description_html(description_html)
+    
+    # Extract posting date
+    posting_date = None
+    if page:
+        posting_date = extract_posting_date(soup, page)
+    
+    # Extract company logo
+    company_logo = ""
+    if page:
+        company_logo = extract_company_logo(page)
+    
+    # Extract skills and preferred skills from description
+    skills, preferred_skills = extract_skills_from_description(
+        description_clean, title or ""
+    )
 
     return {
         "title": text_or_none(title) or "",
         "location": text_or_none(location) or "",
         "salary": text_or_none(salary_text) or "",
-        "description": text_or_none(description) or "",
+        "description": description_clean or "",
         "job_type": job_type or "full_time",
         "work_mode": work_mode or "",
         "external_url": url,
+        "date_posted": posting_date,
+        "company_logo": company_logo,
+        "skills": skills,
+        "preferred_skills": preferred_skills,
     }
 
 
@@ -513,14 +1064,16 @@ def fetch_staff_australia_jobs(max_jobs: int = 100):
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(800)
             html = page.content()
-            data = extract_job_from_detail(html, url)
-            data["date_posted"] = None
+            data = extract_job_from_detail(html, url, page)
 
             obj, created = upsert_job(data)
             created_count += int(created)
             updated_count += int(not created)
             processed += 1
-            logger.info("Saved: %s (%s)", obj.title, "created" if created else "updated")
+            logger.info("Saved: %s (%s) | Skills: %s | Preferred: %s", 
+                       obj.title, "created" if created else "updated",
+                       data.get('skills', '')[:50] + '...' if len(data.get('skills', '')) > 50 else data.get('skills', ''),
+                       data.get('preferred_skills', '')[:50] + '...' if len(data.get('preferred_skills', '')) > 50 else data.get('preferred_skills', ''))
 
         browser.close()
         logger.info("Done. Processed=%s, created=%s, updated=%s", processed, created_count, updated_count)

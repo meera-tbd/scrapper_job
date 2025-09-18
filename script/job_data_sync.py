@@ -960,6 +960,81 @@ class JobDataSynchronizer:
         # Return original payload (unencrypted)
         return job_payload
 
+    def verify_machine_authorization(self) -> Dict[str, Any]:
+        """Verify machine authorization based on configuration."""
+        try:
+            # Get machine verification config
+            machine_verification = self.config.get('machine_verification', {})
+            if not machine_verification.get('enabled', False):
+                return {'authorized': True, 'reason': 'verification_disabled'}
+            
+            # Current machine details
+            current_machine = {
+                'machine_id': self.system_info['machine_id'],
+                'host_name': self.system_info['host_name'], 
+                'windows_login_name': self.system_info['windows_login_name']
+            }
+            
+            # Check authorized machines
+            authorized_machines = self.config.get('authorized_machines', {}).get('source_machines', [])
+            
+            for auth_machine in authorized_machines:
+                if (auth_machine.get('machine_id') == current_machine['machine_id'] and
+                    auth_machine.get('hostname') == current_machine['host_name'] and
+                    auth_machine.get('username') == current_machine['windows_login_name'] and
+                    auth_machine.get('is_authorized', False)):
+                    
+                    self.logger.info(f"Machine authorized: {current_machine['host_name']}/{current_machine['windows_login_name']}")
+                    return {'authorized': True, 'machine': current_machine}
+            
+            self.logger.warning(f"Machine NOT authorized: {current_machine['host_name']}/{current_machine['windows_login_name']}")
+            return {
+                'authorized': False, 
+                'machine': current_machine,
+                'reason': 'machine_not_in_authorized_list'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Machine verification failed: {e}")
+            return {'authorized': False, 'reason': f'verification_error: {str(e)}'}
+
+    def verify_target_machine(self, portal_name: str) -> Dict[str, Any]:
+        """Verify target machine configuration."""
+        try:
+            portal_config = self.config.get('portals', {}).get(portal_name, {})
+            
+            if not portal_config.get('require_machine_verification', False):
+                return {'verified': True, 'reason': 'verification_not_required'}
+                
+            target_machine_id = portal_config.get('target_machine_id')
+            if not target_machine_id:
+                return {'verified': True, 'reason': 'no_target_machine_specified'}
+            
+            target_machines = self.config.get('authorized_machines', {}).get('target_machines', [])
+            
+            for target in target_machines:
+                if (target.get('hostname') == target_machine_id and
+                    target.get('is_authorized', False)):
+                    
+                    expected_ip = target.get('ip_address')
+                    portal_url = portal_config.get('base_url', '')
+                    
+                    if expected_ip and expected_ip in portal_url:
+                        self.logger.info(f"Target machine verified: {target_machine_id} at {expected_ip}")
+                        return {'verified': True, 'target': target}
+                    else:
+                        return {
+                            'verified': False, 
+                            'reason': 'ip_mismatch',
+                            'expected_ip': expected_ip,
+                            'portal_url': portal_url
+                        }
+            
+            return {'verified': False, 'reason': 'target_not_in_authorized_list'}
+            
+        except Exception as e:
+            return {'verified': False, 'reason': f'verification_error: {str(e)}'}
+
     def setup_logging(self):
         """Setup logging configuration."""
         log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -1042,6 +1117,34 @@ class JobDataSynchronizer:
         start_time = datetime.now()
         
         try:
+            # Machine verification before proceeding
+            machine_check = self.verify_machine_authorization()
+            if not machine_check['authorized']:
+                return {
+                    'status': 'blocked',
+                    'error': 'Machine not authorized for data sync',
+                    'machine_info': machine_check.get('machine', {}),
+                    'reason': machine_check.get('reason'),
+                    'message': 'Add this machine to authorized_machines in configuration',
+                    'start_time': start_time.isoformat(),
+                    'end_time': datetime.now().isoformat()
+                }
+            
+            # Target machine verification for all portals
+            for portal_name in self.portals.keys():
+                target_check = self.verify_target_machine(portal_name)
+                if not target_check['verified']:
+                    return {
+                        'status': 'blocked', 
+                        'error': f'Target machine verification failed for {portal_name}',
+                        'target_info': target_check,
+                        'message': 'Target machine not authorized or configuration mismatch',
+                        'start_time': start_time.isoformat(),
+                        'end_time': datetime.now().isoformat()
+                    }
+            
+            self.logger.info("Machine verification passed - proceeding with data sync")
+            
             # Connect to database
             if not self.db_connector.connect():
                 raise ConnectionError("Failed to connect to database")
