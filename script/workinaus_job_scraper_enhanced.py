@@ -12,6 +12,7 @@ import logging
 from decimal import Decimal
 import concurrent.futures
 import json
+from bs4 import BeautifulSoup
 
 # Django setup
 print("Setting up Django environment...")
@@ -158,6 +159,188 @@ class WorkinAUSScraperEnhanced:
         except (ValueError, AttributeError):
             return None
 
+    def convert_to_html_format(self, description):
+        """Convert plain text description to HTML format while preserving structure."""
+        if not description:
+            return ""
+        
+        # Split into lines and process
+        lines = description.strip().split('\n')
+        html_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Convert to HTML with basic formatting
+            line = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            
+            # Detect headings (lines that are all caps or end with colons)
+            if (line.isupper() and len(line) > 3) or line.endswith(':'):
+                html_lines.append(f'<h3>{line}</h3>')
+            # Detect bullet points
+            elif line.startswith('•') or line.startswith('-') or line.startswith('*'):
+                html_lines.append(f'<li>{line[1:].strip()}</li>')
+            # Regular text
+            else:
+                html_lines.append(f'<p>{line}</p>')
+        
+        # Wrap bullet points in ul tags
+        html_content = '\n'.join(html_lines)
+        html_content = re.sub(r'(<li>.*?</li>)', r'<ul>\1</ul>', html_content, flags=re.DOTALL)
+        html_content = re.sub(r'</ul>\s*<ul>', '', html_content)  # Merge adjacent ul tags
+        
+        return html_content
+
+    def extract_skills_from_description(self, description):
+        """Extract skills and preferred skills from job description using keyword matching."""
+        if not description:
+            return [], []
+        
+        # Convert to lowercase for matching
+        desc_lower = description.lower()
+        
+        # Common technical skills
+        technical_skills = [
+            'python', 'java', 'javascript', 'react', 'angular', 'vue', 'node.js', 'html', 'css',
+            'sql', 'mysql', 'postgresql', 'mongodb', 'docker', 'kubernetes', 'aws', 'azure',
+            'git', 'linux', 'windows', 'c++', 'c#', '.net', 'php', 'ruby', 'django', 'flask',
+            'spring', 'hibernate', 'rest api', 'graphql', 'microservices', 'devops', 'ci/cd',
+            'jenkins', 'terraform', 'ansible', 'redis', 'elasticsearch', 'kafka', 'spark',
+            'machine learning', 'data science', 'artificial intelligence', 'deep learning',
+            'tensorflow', 'pytorch', 'pandas', 'numpy', 'tableau', 'power bi', 'excel',
+            'photoshop', 'illustrator', 'figma', 'sketch', 'autocad', 'solidworks'
+        ]
+        
+        # Soft skills
+        soft_skills = [
+            'communication', 'leadership', 'teamwork', 'problem solving', 'analytical thinking',
+            'project management', 'time management', 'customer service', 'sales', 'marketing',
+            'negotiation', 'presentation', 'mentoring', 'training', 'coaching', 'collaboration',
+            'critical thinking', 'creativity', 'adaptability', 'attention to detail',
+            'organizational skills', 'multitasking', 'decision making', 'conflict resolution'
+        ]
+        
+        # Industry-specific skills
+        industry_skills = [
+            'accounting', 'finance', 'healthcare', 'nursing', 'teaching', 'education',
+            'engineering', 'construction', 'manufacturing', 'logistics', 'supply chain',
+            'quality assurance', 'quality control', 'safety', 'compliance', 'audit',
+            'legal', 'paralegal', 'hr', 'recruitment', 'payroll', 'benefits',
+            'retail', 'hospitality', 'customer service', 'food service', 'kitchen',
+            'cooking', 'chef', 'bartending', 'housekeeping', 'maintenance'
+        ]
+        
+        all_skills = technical_skills + soft_skills + industry_skills
+        
+        # Find skills mentioned in description
+        found_skills = []
+        preferred_skills = []
+        
+        for skill in all_skills:
+            if skill in desc_lower:
+                # Check if it's mentioned as preferred/nice-to-have
+                skill_context = self._get_skill_context(desc_lower, skill)
+                if any(word in skill_context for word in ['prefer', 'nice', 'bonus', 'plus', 'advantage', 'desirable']):
+                    preferred_skills.append(skill.title())
+                else:
+                    found_skills.append(skill.title())
+        
+        # Remove duplicates and limit to reasonable numbers
+        found_skills = list(set(found_skills))[:10]  # Limit to 10 main skills
+        preferred_skills = list(set(preferred_skills))[:5]  # Limit to 5 preferred skills
+        
+        return found_skills, preferred_skills
+
+    def _get_skill_context(self, description, skill):
+        """Get the context around a skill mention to determine if it's required or preferred."""
+        skill_index = description.find(skill)
+        if skill_index == -1:
+            return ""
+        
+        # Get 100 characters before and after the skill mention
+        start = max(0, skill_index - 100)
+        end = min(len(description), skill_index + len(skill) + 100)
+        
+        return description[start:end]
+
+    def extract_dates_from_description(self, description, card_text=""):
+        """Extract posting date and closing date from job description and card text."""
+        posting_date = None
+        closing_date = None
+        
+        # Combine description and card text for date extraction
+        full_text = f"{description} {card_text}".lower()
+        
+        # Patterns for posting dates
+        posting_patterns = [
+            r'posted\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'posted\s+(\d{1,2}\s+\w+\s+\d{2,4})',
+            r'date\s+posted[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'(\d{1,2})\s+(days?|weeks?|months?)\s+ago',
+        ]
+        
+        # Patterns for closing dates
+        closing_patterns = [
+            r'closes?\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'deadline[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'apply\s+by[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'closing\s+date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'expires?\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+        ]
+        
+        # Extract posting date
+        for pattern in posting_patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                posting_date = match.group(1)
+                break
+        
+        # Extract closing date
+        for pattern in closing_patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                closing_date = match.group(1)
+                break
+        
+        return posting_date, closing_date
+
+    def parse_specific_date(self, date_string):
+        """Parse specific date strings like '15/12/2024' or '15 Dec 2024'."""
+        if not date_string:
+            return None
+        
+        try:
+            # Try various date formats (Australian DD/MM/YYYY format first)
+            date_formats = [
+                '%d/%m/%Y',    # 18/09/2025 (Australian format - most common)
+                '%d/%m/%y',    # 18/09/25
+                '%d-%m-%Y',    # 18-09-2025
+                '%d-%m-%y',    # 18-09-25
+                '%d %B %Y',    # 18 September 2025
+                '%d %b %Y',    # 18 Sep 2025
+                '%B %d, %Y',   # September 18, 2025
+                '%b %d, %Y',   # Sep 18, 2025
+                '%Y-%m-%d',    # 2025-09-18
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    parsed_date = datetime.strptime(date_string.strip(), fmt)
+                    # Convert to timezone-aware datetime
+                    return timezone.make_aware(parsed_date)
+                except ValueError:
+                    continue
+            
+            # If all formats fail, return None
+            logger.warning(f"Could not parse date: {date_string}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error parsing date '{date_string}': {e}")
+            return None
+
     def extract_job_data_from_card(self, job_card):
         """Extract basic job data from the job card (left side)."""
         try:
@@ -241,8 +424,45 @@ class WorkinAUSScraperEnhanced:
             except:
                 pass
             
-            # Posted date - not easily available in WorkinAUS, set empty
+            # Extract Posted and Closing dates from card text
             job_data['posted_ago'] = ""
+            job_data['posted_date'] = ""
+            job_data['closing_date'] = ""
+            
+            try:
+                # Look for posted date patterns in card text
+                posted_patterns = [
+                    r'posted\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                    r'posted\s+(\d{1,2}/\d{1,2}/\d{2,4})',
+                ]
+                
+                # Look for closing date patterns
+                closing_patterns = [
+                    r'closes?\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                    r'closes?\s+(\d{1,2}/\d{1,2}/\d{2,4})',
+                ]
+                
+                for line in lines:
+                    line_lower = line.lower()
+                    
+                    # Check for posted date
+                    for pattern in posted_patterns:
+                        match = re.search(pattern, line_lower)
+                        if match:
+                            job_data['posted_date'] = match.group(1)
+                            job_data['posted_ago'] = line.strip()
+                            logger.info(f"Found posted date: {match.group(1)}")
+                            break
+                    
+                    # Check for closing date
+                    for pattern in closing_patterns:
+                        match = re.search(pattern, line_lower)
+                        if match:
+                            job_data['closing_date'] = match.group(1)
+                            logger.info(f"Found closing date: {match.group(1)}")
+                            break
+            except Exception as e:
+                logger.warning(f"Error extracting dates from card: {e}")
             
             return job_data
             
@@ -261,6 +481,7 @@ class WorkinAUSScraperEnhanced:
             
             # Look for the detailed description in the right panel
             detailed_description = ""
+            raw_html = ""
             
             # Try multiple selectors for the job description in the detail panel
             description_selectors = [
@@ -282,8 +503,10 @@ class WorkinAUSScraperEnhanced:
                     desc_element = page.query_selector(selector)
                     if desc_element:
                         text = desc_element.evaluate("el => el.innerText").strip()
+                        html = desc_element.evaluate("el => el.innerHTML").strip()
                         if text and len(text) > 100:  # Make sure it's substantial content
                             detailed_description = text
+                            raw_html = html
                             logger.info(f"Found detailed description ({len(text)} chars) using selector: {selector}")
                             break
                 except:
@@ -297,6 +520,7 @@ class WorkinAUSScraperEnhanced:
                     for area in content_areas:
                         try:
                             text = area.evaluate("el => el.innerText").strip()
+                            html = area.evaluate("el => el.innerHTML").strip()
                             # Look for substantial text that contains job-related keywords
                             if (text and len(text) > 200 and 
                                 any(keyword in text.lower() for keyword in [
@@ -304,6 +528,7 @@ class WorkinAUSScraperEnhanced:
                                     'experience', 'skills', 'qualifications', 'duties'
                                 ])):
                                 detailed_description = text
+                                raw_html = html
                                 logger.info(f"Found detailed description ({len(text)} chars) in content area")
                                 break
                         except:
@@ -311,7 +536,7 @@ class WorkinAUSScraperEnhanced:
                 except:
                     pass
             
-            # Clean up the description
+            # Clean up the description and convert to HTML
             if detailed_description:
                 # Remove excessive whitespace and normalize
                 detailed_description = re.sub(r'\s+', ' ', detailed_description)
@@ -331,15 +556,58 @@ class WorkinAUSScraperEnhanced:
                 
                 detailed_description = detailed_description.strip()
                 
+                # Convert to HTML format if we don't have raw HTML or it's not well formatted
+                if not raw_html or len(raw_html.strip()) < len(detailed_description):
+                    html_description = self.convert_to_html_format(detailed_description)
+                else:
+                    # Clean up the raw HTML
+                    html_description = self.clean_html(raw_html)
+                
                 logger.info(f"Extracted detailed description: {detailed_description[:200]}...")
-                return detailed_description
+                return {
+                    'text': detailed_description,
+                    'html': html_description
+                }
             
             logger.warning("Could not extract detailed description")
-            return ""
+            return {
+                'text': "",
+                'html': ""
+            }
             
         except Exception as e:
             logger.error(f"Error extracting detailed description: {e}")
+            return {
+                'text': "",
+                'html': ""
+            }
+
+    def clean_html(self, raw_html):
+        """Clean and format raw HTML content."""
+        if not raw_html:
             return ""
+        
+        try:
+            # Parse with BeautifulSoup to clean up
+            soup = BeautifulSoup(raw_html, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+            
+            # Get clean HTML
+            clean_html = str(soup)
+            
+            # Basic cleanup
+            clean_html = re.sub(r'\s+', ' ', clean_html)
+            clean_html = clean_html.strip()
+            
+            return clean_html
+        except Exception as e:
+            logger.warning(f"Error cleaning HTML: {e}")
+            # Fallback to converting text to HTML
+            text_version = BeautifulSoup(raw_html, 'html.parser').get_text()
+            return self.convert_to_html_format(text_version)
 
     def find_job_cards(self, page):
         """Find individual job card elements within the WorkinAUS structure."""
@@ -416,12 +684,32 @@ class WorkinAUSScraperEnhanced:
                         logger.info(f"Processing valid job {i+1}: {job_data['job_title']} at {job_data['company_name']}")
                         
                         # Extract detailed description by clicking on the card
-                        detailed_description = self.extract_detailed_description(page, job_card)
-                        if detailed_description:
-                            job_data['summary'] = detailed_description
+                        description_data = self.extract_detailed_description(page, job_card)
+                        if description_data['text']:
+                            job_data['summary'] = description_data['text']
+                            job_data['html_description'] = description_data['html']
+                            
+                            # Extract skills from description
+                            skills, preferred_skills = self.extract_skills_from_description(description_data['text'])
+                            job_data['skills'] = ', '.join(skills)
+                            job_data['preferred_skills'] = ', '.join(preferred_skills)
+                            
+                            # Use dates from card first (more reliable), then from description as fallback
+                            if not job_data.get('posted_date') or not job_data.get('closing_date'):
+                                card_text = job_card.evaluate("el => el.innerText")
+                                desc_posting_date, desc_closing_date = self.extract_dates_from_description(description_data['text'], card_text)
+                                
+                                # Use card dates if available, otherwise use description dates
+                                if not job_data.get('posted_date') and desc_posting_date:
+                                    job_data['posted_date'] = desc_posting_date
+                                if not job_data.get('closing_date') and desc_closing_date:
+                                    job_data['closing_date'] = desc_closing_date
                         else:
                             # Fallback to basic summary from card
                             job_data['summary'] = f"Job at {job_data['company_name']} for {job_data['job_title']} position."
+                            job_data['html_description'] = self.convert_to_html_format(job_data['summary'])
+                            job_data['skills'] = ""
+                            job_data['preferred_skills'] = ""
                         
                         # Save to database
                         if self.save_job_to_database(job_data):
@@ -502,12 +790,29 @@ class WorkinAUSScraperEnhanced:
                 # Determine job category using title and description
                 job_category = self._categorize_job(job_data.get('job_title', ''), job_data.get('summary', ''))
                 
+                # Process posting and closing dates
+                parsed_posting_date = None
+                
+                # Try to parse the posted_date first (from card extraction)
+                if job_data.get('posted_date'):
+                    parsed_posting_date = self.parse_specific_date(job_data['posted_date'])
+                    logger.info(f"Parsed posting date from card: {job_data['posted_date']} -> {parsed_posting_date}")
+                
+                # Fallback to parsing posted_ago text or current time
+                if not parsed_posting_date:
+                    parsed_posting_date = self.parse_date(job_data.get('posted_ago')) or timezone.now()
+                    logger.info(f"Using fallback posting date: {parsed_posting_date}")
+                
+                # Log closing date if available
+                if job_data.get('closing_date'):
+                    logger.info(f"Found closing date: {job_data['closing_date']}")
+                
                 # Create job posting
                 job_posting = JobPosting.objects.create(
                     title=job_data.get('job_title', 'Unknown Position'),
                     company=company,
                     location=location,
-                    description=job_data.get('summary', ''),
+                    description=job_data.get('html_description', job_data.get('summary', '')),
                     external_url=external_url,
                     salary_min=salary_min,
                     salary_max=salary_max,
@@ -516,11 +821,14 @@ class WorkinAUSScraperEnhanced:
                     salary_raw_text=job_data.get('salary_text', ''),
                     job_type=self._map_job_type(job_data.get('job_type_text', '')),
                     job_category=job_category,
-                    date_posted=self.parse_date(job_data.get('posted_ago')) or timezone.now(),
+                    date_posted=parsed_posting_date,
                     posted_by=self.system_user,
                     external_source='workinaus.com.au',
                     status='active',
                     posted_ago=job_data.get('posted_ago', ''),
+                    skills=job_data.get('skills', ''),
+                    preferred_skills=job_data.get('preferred_skills', ''),
+                    job_closing_date=job_data.get('closing_date', ''),
                     additional_info=job_data
                 )
                 

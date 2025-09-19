@@ -16,6 +16,8 @@ class JobPostingAdmin(admin.ModelAdmin):
         'company',
         'location',
         'job_category',
+        'skills',
+        'preferred_skills',
         'job_type',
         'job_closing_date',
         'salary_display_admin',

@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
+import html
 
 # Setup Django environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -557,56 +558,288 @@ class ScoutJobsAustraliaJobScraper:
             self.logger.debug(f"Error extracting clean text content from {job_url}: {e}")
             return ""
     
+    def generate_skills_from_content(self, job_title, job_description):
+        """Generate skills and preferred skills dynamically from job title and description content."""
+        try:
+            # Clean and prepare the content for analysis
+            if not job_description:
+                job_description = ""
+            
+            # Remove HTML tags if present and get plain text
+            import re
+            plain_description = re.sub(r'<[^>]+>', ' ', job_description)
+            plain_description = re.sub(r'\s+', ' ', plain_description).strip()
+            
+            # Combine title and description for comprehensive analysis
+            combined_text = f"{job_title} {plain_description}".lower()
+            
+            self.logger.debug(f"Analyzing content for skills: Title='{job_title}', Description preview='{plain_description[:100]}...'")
+            
+            # Comprehensive skills database with exact keyword matching
+            skills_database = {
+                # Technical Skills
+                'Python Programming': ['python', 'django', 'flask', 'fastapi', 'py'],
+                'JavaScript Development': ['javascript', 'js', 'node.js', 'nodejs', 'react', 'vue', 'angular', 'typescript'],
+                'Java Development': ['java', 'spring', 'hibernate', 'maven', 'jsp'],
+                'Web Development': ['html', 'css', 'web development', 'frontend', 'backend', 'full stack'],
+                'Database Management': ['sql', 'mysql', 'postgresql', 'mongodb', 'database', 'oracle', 'sqlite'],
+                'Cloud Computing': ['aws', 'azure', 'gcp', 'cloud', 'docker', 'kubernetes'],
+                
+                # Design & Creative Skills
+                'Graphic Design': ['photoshop', 'illustrator', 'indesign', 'graphic design', 'visual design', 'adobe creative'],
+                'Creative Design': ['creative', 'design', 'branding', 'typography', 'adobe', 'creative suite'],
+                'Video Editing': ['video editing', 'premiere', 'after effects', 'final cut'],
+                
+                # Marketing & Sales Skills
+                'Digital Marketing': ['seo', 'sem', 'ppc', 'google ads', 'facebook ads', 'digital marketing', 'adwords'],
+                'Content Marketing': ['content marketing', 'copywriting', 'social media', 'blogging', 'content creation'],
+                'Email Marketing': ['email marketing', 'mailchimp', 'newsletter', 'email automation'],
+                'Sales Techniques': ['sales', 'crm', 'salesforce', 'lead generation', 'prospecting', 'closing deals'],
+                'Social Media Management': ['social media', 'facebook', 'instagram', 'linkedin', 'twitter', 'tiktok'],
+                
+                # Customer Service & Communication
+                'Customer Service': ['customer service', 'support', 'help desk', 'phone skills', 'client relations'],
+                'Communication Skills': ['communication', 'presentation', 'writing', 'speaking', 'verbal', 'written'],
+                'Public Relations': ['public relations', 'pr', 'media relations', 'press releases'],
+                
+                # Hospitality & Food Service Skills
+                'Food Preparation': ['food preparation', 'prep cook', 'chopping', 'slicing', 'dicing', 'meal prep', 'ingredient preparation'],
+                'Kitchen Operations': ['kitchen', 'kitchen operations', 'kitchen management', 'line cook', 'grill', 'fryer', 'oven'],
+                'Cooking Skills': ['cooking', 'culinary', 'chef', 'cuisine', 'recipe', 'food cooking', 'kitchen skills'],
+                'Food Safety & Hygiene': ['food safety', 'hygiene', 'haccp', 'food handling', 'sanitation', 'clean kitchen', 'health standards'],
+                'Kitchen Equipment': ['kitchen equipment', 'commercial kitchen', 'dishwasher', 'food processor', 'mixer', 'deep fryer'],
+                'Bartending': ['bartending', 'bar', 'cocktails', 'drinks', 'mixology', 'alcohol service'],
+                'Coffee Making': ['barista', 'coffee', 'espresso', 'latte', 'cappuccino', 'coffee machine'],
+                'Restaurant Service': ['waiting tables', 'server', 'waiter', 'waitress', 'table service', 'hospitality'],
+                'Hotel Management': ['hotel', 'accommodation', 'guest services', 'front desk', 'concierge'],
+                'Dishwashing': ['dishwashing', 'dish pit', 'cleaning dishes', 'kitchen cleaning', 'washing up'],
+                'Inventory Management': ['inventory', 'stock control', 'ordering supplies', 'food inventory', 'stock rotation'],
+                
+                # Retail Skills
+                'Retail Operations': ['retail', 'pos', 'point of sale', 'inventory', 'merchandising', 'stock management'],
+                'Visual Merchandising': ['visual merchandising', 'display', 'store layout', 'product presentation'],
+                'Cash Handling': ['cash handling', 'register', 'money', 'transactions', 'payments'],
+                'Store Management': ['store management', 'retail management', 'shop', 'store operations'],
+                
+                # Management & Leadership Skills
+                'Team Leadership': ['leadership', 'team management', 'supervision', 'mentoring', 'staff management'],
+                'Project Management': ['project management', 'agile', 'scrum', 'waterfall', 'pmp', 'project planning'],
+                'Operations Management': ['operations', 'logistics', 'supply chain', 'process improvement'],
+                
+                # Office & Administrative Skills
+                'Microsoft Office': ['excel', 'word', 'powerpoint', 'outlook', 'office 365', 'microsoft office'],
+                'Data Entry': ['data entry', 'typing', 'data processing', 'clerical', 'administrative'],
+                'Accounting': ['accounting', 'bookkeeping', 'financial', 'quickbooks', 'invoicing'],
+                
+                # General Professional Skills
+                'Problem Solving': ['problem solving', 'analytical', 'critical thinking', 'troubleshooting'],
+                'Time Management': ['time management', 'organization', 'multitasking', 'prioritization', 'scheduling'],
+                'Teamwork': ['teamwork', 'collaboration', 'team player', 'working with others'],
+                'Attention to Detail': ['attention to detail', 'detail oriented', 'accuracy', 'precise'],
+                'Flexibility': ['flexibility', 'adaptability', 'versatile', 'adaptable'],
+                'Training & Development': ['training', 'education', 'mentoring', 'coaching', 'development']
+            }
+            
+            # Find skills that actually appear in the content
+            found_skills = []
+            skill_scores = {}
+            
+            for skill_name, keywords in skills_database.items():
+                score = 0
+                found_keywords = []
+                
+                for keyword in keywords:
+                    # Count how many times each keyword appears
+                    count = combined_text.count(keyword.lower())
+                    if count > 0:
+                        score += count
+                        found_keywords.append(keyword)
+                
+                if score > 0:
+                    found_skills.append({
+                        'name': skill_name,
+                        'score': score,
+                        'keywords': found_keywords
+                    })
+            
+            # Sort skills by relevance score (how many times mentioned)
+            found_skills.sort(key=lambda x: x['score'], reverse=True)
+            
+            # Extract the most relevant skills
+            primary_skills = []
+            preferred_skills = []
+            
+            # Get top scoring skills for primary skills (limit to 3)
+            for skill in found_skills[:3]:
+                primary_skills.append(skill['name'])
+                self.logger.debug(f"Primary skill found: {skill['name']} (score: {skill['score']}, keywords: {skill['keywords']})")
+            
+            # Get next best skills for preferred skills (limit to 3)
+            for skill in found_skills[3:6]:
+                preferred_skills.append(skill['name'])
+                self.logger.debug(f"Preferred skill found: {skill['name']} (score: {skill['score']}, keywords: {skill['keywords']})")
+            
+            # If we don't have enough skills, add some based on job title context
+            title_lower = job_title.lower()
+            
+            # Add context-based skills if not enough found in description
+            if len(primary_skills) < 3:
+                if any(word in title_lower for word in ['kitchen', 'cook', 'chef', 'culinary', 'prep']):
+                    kitchen_skills = ['Kitchen Operations', 'Food Preparation', 'Cooking Skills', 'Food Safety & Hygiene']
+                    for skill in kitchen_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+                            
+                elif any(word in title_lower for word in ['attendant', 'dish', 'cleaner']):
+                    if 'kitchen' in title_lower:
+                        attendant_skills = ['Kitchen Operations', 'Food Safety & Hygiene', 'Dishwashing']
+                    else:
+                        attendant_skills = ['Customer Service', 'Attention to Detail', 'Time Management']
+                    for skill in attendant_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+                        
+                elif any(word in title_lower for word in ['barista', 'coffee']):
+                    barista_skills = ['Coffee Making', 'Customer Service', 'Cash Handling']
+                    for skill in barista_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+                        
+                elif any(word in title_lower for word in ['waiter', 'server', 'waitress', 'section']):
+                    server_skills = ['Restaurant Service', 'Customer Service', 'Communication Skills']
+                    for skill in server_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+                        
+                elif any(word in title_lower for word in ['retail', 'sales', 'shop', 'showroom']):
+                    retail_skills = ['Retail Operations', 'Customer Service', 'Sales Techniques']
+                    for skill in retail_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+                        
+                elif any(word in title_lower for word in ['manager', 'supervisor', 'coordinator', 'head', 'lead']):
+                    mgmt_skills = ['Team Leadership', 'Communication Skills', 'Operations Management']
+                    for skill in mgmt_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+                            
+                elif any(word in title_lower for word in ['bartender', 'bar']):
+                    bar_skills = ['Bartending', 'Customer Service', 'Cash Handling']
+                    for skill in bar_skills:
+                        if skill not in primary_skills and len(primary_skills) < 3:
+                            primary_skills.append(skill)
+            
+            # Fill with essential skills if still not enough
+            essential_skills = ['Communication Skills', 'Teamwork', 'Time Management', 'Problem Solving', 'Customer Service']
+            for skill in essential_skills:
+                if len(primary_skills) >= 3:
+                    break
+                if skill not in primary_skills:
+                    primary_skills.append(skill)
+            
+            # Fill preferred skills if needed - make them contextual and different from primary
+            if len(preferred_skills) < 3:
+                # Context-based preferred skills
+                contextual_preferred = []
+                
+                if any(word in title_lower for word in ['kitchen', 'cook', 'chef', 'food']):
+                    contextual_preferred = ['Teamwork', 'Time Management', 'Attention to Detail', 'Inventory Management', 'Kitchen Equipment']
+                elif any(word in title_lower for word in ['server', 'waiter', 'waitress', 'hospitality']):
+                    contextual_preferred = ['Multitasking', 'Memory Skills', 'Physical Stamina', 'Teamwork', 'Upselling']
+                elif any(word in title_lower for word in ['retail', 'sales', 'shop']):
+                    contextual_preferred = ['Product Knowledge', 'Visual Merchandising', 'Upselling', 'Problem Solving', 'Teamwork']
+                elif any(word in title_lower for word in ['manager', 'supervisor', 'lead']):
+                    contextual_preferred = ['Strategic Planning', 'Budget Management', 'Training & Development', 'Performance Management']
+                else:
+                    contextual_preferred = ['Flexibility', 'Attention to Detail', 'Problem Solving', 'Teamwork', 'Time Management']
+                
+                # Add contextual preferred skills that aren't already in primary skills
+                for skill in contextual_preferred:
+                    if skill not in primary_skills and skill not in preferred_skills and len(preferred_skills) < 3:
+                        preferred_skills.append(skill)
+                
+                # Fill with remaining essential skills if still needed
+                if len(preferred_skills) < 2:
+                    remaining_essential = [s for s in essential_skills if s not in primary_skills and s not in preferred_skills]
+                    for skill in remaining_essential[:3]:
+                        if len(preferred_skills) < 3:
+                            preferred_skills.append(skill)
+            
+            # Ensure we have exactly 2-3 skills in each category
+            primary_skills = primary_skills[:3]
+            preferred_skills = preferred_skills[:3]
+            
+            # Convert to comma-separated strings
+            skills_str = ', '.join(primary_skills)
+            preferred_skills_str = ', '.join(preferred_skills)
+            
+            self.logger.info(f"🔍 Skills Analysis for '{job_title}':")
+            self.logger.info(f"   📋 Content analyzed: {len(combined_text)} characters")
+            self.logger.info(f"   🎯 Skills found in content: {len(found_skills)} unique skills")
+            self.logger.info(f"   🔧 Primary Skills: {skills_str}")
+            self.logger.info(f"   ⭐ Preferred Skills: {preferred_skills_str}")
+            
+            return skills_str, preferred_skills_str
+            
+        except Exception as e:
+            self.logger.error(f"Error generating dynamic skills: {e}")
+            # Return basic fallback skills
+            return "Communication Skills, Customer Service", "Teamwork, Time Management"
+
     def extract_structured_text_content(self, container):
-        """Extract and format text content in a structured way."""
+        """Extract and format text content in a structured HTML way."""
         import re
-        result_parts = []
+        html_parts = []
         
         try:
+            # Start HTML structure
+            html_parts.append('<div class="job-posting">')
+            
             # 1. Extract company logo alt text (company name)
             logo_img = container.query_selector('img.job-logo')
             if logo_img:
                 company_name = logo_img.get_attribute('alt')
                 if company_name:
-                    result_parts.append(company_name.strip())
+                    html_parts.append(f'<div class="company-name"><strong>{html.escape(company_name.strip())}</strong></div>')
             
             # 2. Extract job title
             job_title = container.query_selector('h1.job-title')
             if job_title:
                 title_text = job_title.text_content().strip()
                 if title_text:
-                    result_parts.append(title_text)
+                    html_parts.append(f'<h1 class="job-title">{html.escape(title_text)}</h1>')
             
             # 3. Extract company name from group-name
             company_info = container.query_selector('h4.group-name span[itemprop="name"]')
             if company_info:
                 company_text = company_info.text_content().strip()
                 if company_text:
-                    result_parts.append(company_text)
+                    html_parts.append(f'<h2 class="company-info">{html.escape(company_text)}</h2>')
             
-            # 4. Extract metadata (Date Listed, Location, Salary, etc.) with proper formatting
+            # 4. Extract metadata (Date Listed, Location, Salary, etc.) with proper HTML formatting
             meta_items = container.query_selector_all('.job-meta ul li')
-            for item in meta_items:
-                try:
-                    label_elem = item.query_selector('.l')
-                    value_elem = item.query_selector('.val')
-                    
-                    if label_elem and value_elem:
-                        label = label_elem.text_content().strip()
-                        value = value_elem.text_content().strip()
+            if meta_items:
+                html_parts.append('<div class="job-meta">')
+                html_parts.append('<ul>')
+                for item in meta_items:
+                    try:
+                        label_elem = item.query_selector('.l')
+                        value_elem = item.query_selector('.val')
                         
-                        # Clean up the value text - remove excessive whitespace and newlines
-                        value = re.sub(r'\s+', ' ', value)
-                        value = value.replace('\n', ' ').replace('\r', ' ')
-                        
-                        if label and value:
-                            result_parts.append(f"{label} {value}")
-                except:
-                    continue
-            
-            # Add an empty line after metadata for better readability
-            if result_parts:
-                result_parts.append("")
+                        if label_elem and value_elem:
+                            label = label_elem.text_content().strip()
+                            value = value_elem.text_content().strip()
+                            
+                            # Clean up the value text - remove excessive whitespace and newlines
+                            value = re.sub(r'\s+', ' ', value)
+                            value = value.replace('\n', ' ').replace('\r', ' ')
+                            
+                            if label and value:
+                                html_parts.append(f'<li><strong>{html.escape(label)}</strong> {html.escape(value)}</li>')
+                    except:
+                        continue
+                html_parts.append('</ul>')
+                html_parts.append('</div>')
             
             # 5. Extract short description
             short_descr = container.query_selector('.short-descr')
@@ -615,10 +848,9 @@ class ScoutJobsAustraliaJobScraper:
                 if short_text:
                     # Clean the short description text
                     short_text = re.sub(r'\s+', ' ', short_text)
-                    result_parts.append(short_text)
-                    result_parts.append("")  # Add spacing after short description
+                    html_parts.append(f'<div class="short-description"><p>{html.escape(short_text)}</p></div>')
             
-            # 6. Extract bullet points (benefits/highlights) with better formatting
+            # 6. Extract bullet points (benefits/highlights) with HTML formatting
             bullet_points = []
             bullet_lists = container.query_selector_all('ul')
             for ul in bullet_lists:
@@ -636,14 +868,19 @@ class ScoutJobsAustraliaJobScraper:
                     # Skip metadata items and empty items
                     if (li_text and len(li_text) > 3 and 
                         not any(skip in li_text.lower() for skip in ['date listed:', 'location:', 'salary:', 'industry:', 'position:', 'work type:'])):
-                        bullet_points.append(f"• {li_text}")
+                        bullet_points.append(li_text)
             
-            # Add bullet points if any were found
+            # Add bullet points as HTML list if any were found
             if bullet_points:
-                result_parts.extend(bullet_points)
-                result_parts.append("")  # Add spacing after bullet points
+                html_parts.append('<div class="benefits">')
+                html_parts.append('<h3>Benefits & Highlights:</h3>')
+                html_parts.append('<ul>')
+                for point in bullet_points:
+                    html_parts.append(f'<li>{html.escape(point)}</li>')
+                html_parts.append('</ul>')
+                html_parts.append('</div>')
             
-            # 7. Extract detailed description with better paragraph formatting
+            # 7. Extract detailed description with HTML paragraph formatting
             detail_descr = container.query_selector('.detail-descr')
             if detail_descr:
                 detail_text = detail_descr.text_content().strip()
@@ -667,26 +904,28 @@ class ScoutJobsAustraliaJobScraper:
                         if para and len(para) > 10:
                             cleaned_paragraphs.append(para)
                     
-                    # Join paragraphs with proper spacing
+                    # Add paragraphs as HTML
                     if cleaned_paragraphs:
-                        result_parts.append('\n\n'.join(cleaned_paragraphs))
-                        result_parts.append("")  # Add spacing after description
+                        html_parts.append('<div class="detailed-description">')
+                        html_parts.append('<h3>Job Description:</h3>')
+                        for para in cleaned_paragraphs:
+                            html_parts.append(f'<p>{html.escape(para)}</p>')
+                        html_parts.append('</div>')
             
             # 8. Extract Apply Now button text
             apply_btn = container.query_selector('a.btn')
             if apply_btn:
                 btn_text = apply_btn.text_content().strip()
                 if btn_text:
-                    result_parts.append(btn_text)
+                    html_parts.append(f'<div class="apply-section"><strong>{html.escape(btn_text)}</strong></div>')
             
-            # Combine all parts and clean up final formatting
-            final_text = '\n'.join(result_parts)
+            # Close HTML structure
+            html_parts.append('</div>')
             
-            # Clean up excessive empty lines
-            final_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', final_text)
-            final_text = re.sub(r'^\n+|\n+$', '', final_text)
+            # Combine all HTML parts
+            final_html = '\n'.join(html_parts)
             
-            return final_text
+            return final_html
             
         except Exception as e:
             self.logger.debug(f"Error in extract_structured_text_content: {e}")
@@ -1096,6 +1335,12 @@ class ScoutJobsAustraliaJobScraper:
                 )
                 tags_str = ','.join(tags_list[:10])  # Limit to 10 tags
                 
+                # Generate skills and preferred skills from content
+                skills_str, preferred_skills_str = self.generate_skills_from_content(
+                    job_data['title'], 
+                    job_data.get('description', '')
+                )
+                
                 # Create unique slug
                 base_slug = slugify(job_data['title'])
                 unique_slug = base_slug
@@ -1123,6 +1368,8 @@ class ScoutJobsAustraliaJobScraper:
                     external_url=job_data.get('external_url', ''),
                     status='active',
                     tags=tags_str,
+                    skills=skills_str,
+                    preferred_skills=preferred_skills_str,
                     posted_ago=job_data.get('posted_date', ''),
                     additional_info={
                         'scraper_version': 'ScoutJobs-Australia-1.0',
@@ -1133,6 +1380,8 @@ class ScoutJobsAustraliaJobScraper:
                 self.jobs_saved += 1
                 location_str = f" - {location.name}" if location else ""
                 self.logger.info(f"SAVED: {job_data['title']} at {job_data['company_name']}{location_str}")
+                self.logger.info(f"  🔧 Skills: {skills_str}")
+                self.logger.info(f"  ⭐ Preferred Skills: {preferred_skills_str}")
                 return True
                 
         except Exception as e:
@@ -1229,6 +1478,17 @@ class ScoutJobsAustraliaJobScraper:
                                 self.logger.info(f"📄 Enhanced description for: {job_data['title']} (Job Type: {accurate_job_type}, Salary: {salary_raw_text})")
                             else:
                                 self.logger.info(f"📄 Enhanced description for: {job_data['title']} (Job Type: {accurate_job_type})")
+                            
+                            # Generate and log skills for this job
+                            try:
+                                skills_str, preferred_skills_str = self.generate_skills_from_content(
+                                    job_data['title'], 
+                                    job_data.get('description', '')
+                                )
+                                self.logger.info(f"  🔧 Generated Skills: {skills_str}")
+                                self.logger.info(f"  ⭐ Generated Preferred Skills: {preferred_skills_str}")
+                            except Exception as skill_error:
+                                self.logger.debug(f"Error generating skills preview: {skill_error}")
                         
                         # Go back to main page after each job detail visit
                         self.page.goto(f"{self.base_url}/jobs", wait_until='domcontentloaded', timeout=30000)

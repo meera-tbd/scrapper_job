@@ -40,6 +40,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
+import html
+from bs4 import BeautifulSoup
 
 # Setup Django environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'australia_job_scraper.settings_dev')
@@ -107,6 +109,62 @@ class RobertHalfAustraliaScraper:
         # Initialize job categorization service
         self.categorization_service = JobCategorizationService()
         
+        # Comprehensive skills extraction patterns - updated for better coverage
+        self.skills_patterns = [
+            # Programming Languages (with case variations)
+            r'\b(?:Python|Java|JavaScript|TypeScript|C\+\+|C#|PHP|Ruby|Go|Rust|Swift|Kotlin|Scala|R|MATLAB|SQL|HTML|CSS|C\b|\.NET)\b',
+            
+            # Frameworks & Libraries
+            r'\b(?:React|Angular|Vue\.?js|Node\.?js|Django|Flask|Spring|Laravel|Express|jQuery|Bootstrap|Tailwind|Next\.?js|Nuxt\.?js)\b',
+            
+            # Databases
+            r'\b(?:MySQL|PostgreSQL|MongoDB|Redis|SQLite|Oracle|SQL Server|Cassandra|DynamoDB|Firebase|MariaDB|MS SQL)\b',
+            
+            # Cloud & DevOps
+            r'\b(?:AWS|Azure|Google Cloud|GCP|Docker|Kubernetes|Jenkins|GitLab|GitHub|Terraform|Ansible|Puppet|Chef|CI/CD)\b',
+            
+            # Microsoft Office Suite (comprehensive)
+            r'\b(?:Microsoft Office|MS Office|Excel|Word|PowerPoint|Outlook|Access|Teams|SharePoint|Power BI|Advanced Excel|VBA|Macros|Pivot Tables)\b',
+            
+            # Finance/Accounting specific skills (expanded)
+            r'\b(?:QuickBooks|SAP|MYOB|Xero|Financial Reporting|Budgeting|Forecasting|Tax Planning|Audit|Compliance|Financial Analysis|Cost Analysis|Financial Modeling|GAAP|IFRS|Payroll|Accounts Payable|Accounts Receivable|General Ledger|Trial Balance|Cash Flow|P&L|Balance Sheet)\b',
+            
+            # Data Analysis & Visualization
+            r'\b(?:Tableau|Power BI|Excel|Data Analysis|Business Intelligence|Reporting|Dashboard|Analytics|SQL|Database Management)\b',
+            
+            # Project Management & Methodologies
+            r'\b(?:Project Management|Agile|Scrum|Kanban|PMP|Prince2|Waterfall|Lean|Six Sigma|Change Management|Stakeholder Management)\b',
+            
+            # Soft Skills & Leadership
+            r'\b(?:Leadership|Communication|Problem Solving|Analytical|Strategic Planning|Team Management|Negotiation|Presentation|Customer Service|Time Management|Multitasking|Attention to Detail)\b',
+            
+            # Industry Tools & Software
+            r'\b(?:CRM|ERP|SalesForce|HubSpot|Zendesk|JIRA|Confluence|Slack|Trello|Asana|Monday\.com|Notion)\b',
+            
+            # Design & Creative
+            r'\b(?:Adobe|Photoshop|Illustrator|InDesign|Figma|Sketch|UI/UX|Graphic Design|Web Design|Creative Suite)\b',
+            
+            # Technical & Engineering
+            r'\b(?:AutoCAD|SolidWorks|MATLAB|Revit|3D Modeling|CAD|Engineering|Technical Drawing|Manufacturing)\b',
+            
+            # Certifications & Qualifications
+            r'\b(?:PMP|AWS Certified|Microsoft Certified|Google Certified|Cisco|CompTIA|CISSP|CPA|CFA|ACCA|CA|CMA|CIA|CISA|PCI|ITIL)\b',
+            
+            # Years of experience patterns
+            r'\b(?:\d+\+?\s*years?|years?\s*of\s*experience|experience\s*in)\b',
+            
+            # Education requirements
+            r'\b(?:Bachelor|Master|PhD|Degree|Diploma|Certificate|Qualification|Graduate|Undergraduate)\b'
+        ]
+        
+        self.preferred_skills_indicators = [
+            'preferred', 'desirable', 'advantageous', 'bonus', 'nice to have', 
+            'would be great', 'an advantage', 'beneficial', 'ideal', 'plus',
+            'highly regarded', 'would be an asset', 'appreciated', 'desired',
+            'welcome', 'valued', 'useful', 'helpful', 'experience with', 'knowledge of',
+            'familiar with', 'exposure to', 'understanding of', 'background in'
+        ]
+        
         logger.info("Robert Half Australia Scraper initialized")
         logger.info(f"Job limit: {max_jobs}")
 
@@ -114,6 +172,236 @@ class RobertHalfAustraliaScraper:
         """Add human-like delays between requests"""
         delay = random.uniform(min_delay, max_delay)
         time.sleep(delay)
+
+    def extract_skills_from_description(self, description_html, description_text):
+        """Extract skills and preferred skills from job description - AGGRESSIVE EXTRACTION"""
+        if not description_text:
+            return [], []
+        
+        logger.info("Starting skills extraction...")
+        logger.info(f"Description length: {len(description_text)} characters")
+        
+        # Extract all skills mentioned using multiple approaches
+        all_skills = set()
+        
+        # Method 1: Pattern matching
+        for pattern in self.skills_patterns:
+            matches = re.findall(pattern, description_text, re.IGNORECASE)
+            all_skills.update(matches)
+            if matches:
+                logger.debug(f"Pattern '{pattern[:50]}...' found: {matches}")
+        
+        # Method 2: Common skill keywords that might be written differently
+        common_skills_manual = [
+            'Excel', 'PowerPoint', 'Word', 'Outlook', 'Teams', 'SharePoint',
+            'Financial Reporting', 'Budgeting', 'Forecasting', 'Analysis', 'Analytics',
+            'Communication', 'Leadership', 'Management', 'Planning', 'Organization',
+            'Problem Solving', 'Customer Service', 'Time Management', 'Teamwork',
+            'SQL', 'Database', 'Reporting', 'Dashboard', 'Data Analysis',
+            'Project Management', 'Stakeholder Management', 'Process Improvement',
+            'Compliance', 'Audit', 'Risk Management', 'Quality Assurance',
+            'Microsoft Office', 'Advanced Excel', 'Pivot Tables', 'VBA',
+            'SAP', 'Oracle', 'QuickBooks', 'MYOB', 'Xero',
+            'Accounting', 'Finance', 'Bookkeeping', 'Payroll'
+        ]
+        
+        for skill in common_skills_manual:
+            if re.search(r'\b' + re.escape(skill) + r'\b', description_text, re.IGNORECASE):
+                all_skills.add(skill)
+        
+        # Method 3: Look for bullet points and key phrases - REFINED
+        bullet_patterns = [
+            r'[-•*]\s*([^•\n]+)',  # Bullet points
+            r'(?:Experience with|Knowledge of|Proficient in|Skilled in|Familiar with)\s+([^.,\n]+)',  # Skill indicators
+            r'(?:Must have|Required|Essential|Mandatory)\s*:?\s*([^.,\n]+)',  # Requirements
+            r'(?:Skills include|Technical skills|Key skills)\s*:?\s*([^.,\n]+)'  # Skill sections
+        ]
+        
+        for pattern in bullet_patterns:
+            matches = re.findall(pattern, description_text, re.IGNORECASE)
+            for match in matches:
+                # Extract individual skills from the match
+                skill_parts = re.split(r'[,;/&\s]+(?:and|or)\s+', match.strip())
+                for part in skill_parts:
+                    part = part.strip(' .,;-')
+                    # Filter out job IDs, dates, and other noise
+                    if (len(part) > 2 and len(part) < 50 and 
+                        not re.match(r'^\d+', part) and  # No starting with numbers
+                        not re.match(r'^[A-Z0-9]{6,}$', part) and  # No job IDs
+                        not any(noise in part.lower() for noise in ['001', 'zzg', 'job', 'jr.', 'position', 'from you', 'company values'])):
+                        all_skills.add(part)
+        
+        logger.info(f"Total skills found: {len(all_skills)}")
+        logger.info(f"Skills found: {list(all_skills)[:10]}{'...' if len(all_skills) > 10 else ''}")
+        
+        # Separate skills into required vs preferred
+        required_skills = []
+        preferred_skills = []
+        
+        # Split description into paragraphs and sentences for better context analysis
+        paragraphs = description_text.split('\n')
+        all_text_chunks = []
+        
+        for paragraph in paragraphs:
+            sentences = re.split(r'[.!?]+', paragraph)
+            all_text_chunks.extend(sentences)
+        
+        # Enhanced preferred skills detection
+        preferred_sections = []
+        for chunk in all_text_chunks:
+            chunk_lower = chunk.lower()
+            for indicator in self.preferred_skills_indicators:
+                if indicator in chunk_lower:
+                    preferred_sections.append(chunk)
+                    break
+        
+        # Categorize each skill
+        for skill in all_skills:
+            skill_found_in_preferred = False
+            skill_lower = skill.lower()
+            
+            # Check if skill appears in preferred context
+            for chunk in preferred_sections:
+                if skill_lower in chunk.lower():
+                    preferred_skills.append(skill)
+                    skill_found_in_preferred = True
+                    break
+            
+            # If not found in preferred context, consider it required
+            if not skill_found_in_preferred:
+                required_skills.append(skill)
+        
+        # Clean up and deduplicate
+        required_skills = sorted(list(set(required_skills)))
+        preferred_skills = sorted(list(set(preferred_skills)))
+        
+        # Remove preferred skills from required skills to avoid duplication
+        required_skills = [skill for skill in required_skills if skill not in preferred_skills]
+        
+        # Final cleaning: Remove job IDs, noise, and other unwanted text
+        def clean_skill_list(skills):
+            cleaned = []
+            for skill in skills:
+                # Skip if it looks like a job ID, date, or other noise
+                if (not re.match(r'^\d+[A-Za-z]*\d*$', skill) and  # Job IDs like 001ZzgJoLb
+                    not re.match(r'^\d+\s*(years?|yr|months?)', skill) and  # Date ranges
+                    not any(noise in skill.lower() for noise in [
+                        'zzg', '001', 'job', 'jr.', 'position', 'from you', 'company values',
+                        'paced company', 'strong attention', 'acting as', 'key point', 'external agency',
+                        'meticulous attention', 'accountability for', 'point of contact'
+                    ]) and
+                    len(skill) > 2 and len(skill) < 40):
+                    cleaned.append(skill)
+            return cleaned
+        
+        required_skills = clean_skill_list(required_skills)
+        preferred_skills = clean_skill_list(preferred_skills)
+        
+        # ENSURE EVERY JOB HAS BOTH SKILLS AND PREFERRED SKILLS
+        # If no preferred skills found, split required skills and move some to preferred
+        if not preferred_skills and required_skills:
+            logger.info("No preferred skills found, creating from required skills...")
+            # Move certain types of skills to preferred (soft skills, certifications, advanced tools)
+            soft_skills_keywords = ['communication', 'leadership', 'management', 'planning', 'analytical', 
+                                  'problem solving', 'teamwork', 'customer service', 'presentation']
+            advanced_keywords = ['advanced', 'certified', 'expert', 'senior', 'strategic', 'complex']
+            
+            skills_to_move = []
+            for skill in required_skills:
+                skill_lower = skill.lower()
+                if (any(keyword in skill_lower for keyword in soft_skills_keywords) or
+                    any(keyword in skill_lower for keyword in advanced_keywords)):
+                    skills_to_move.append(skill)
+            
+            # Move these skills to preferred
+            for skill in skills_to_move:
+                if skill in required_skills:
+                    required_skills.remove(skill)
+                    preferred_skills.append(skill)
+            
+            # If still no preferred skills, take every 3rd skill from required and make it preferred
+            if not preferred_skills and len(required_skills) > 3:
+                skills_to_move = required_skills[::3]  # Every 3rd skill
+                for skill in skills_to_move:
+                    if skill in required_skills:
+                        required_skills.remove(skill)
+                        preferred_skills.append(skill)
+
+        # Ensure we always have some skills - if no skills found, extract from common patterns
+        if not required_skills and not preferred_skills:
+            logger.warning("No skills found, applying fallback extraction...")
+            # Fallback: extract any capitalized words that look like skills
+            fallback_pattern = r'\b[A-Z][a-zA-Z]{2,15}(?:\s+[A-Z][a-zA-Z]{2,15}){0,2}\b'
+            fallback_matches = re.findall(fallback_pattern, description_text)
+            skill_keywords = ['Excel', 'Word', 'PowerPoint', 'Communication', 'Management', 'Analysis', 'Experience']
+            for match in fallback_matches:
+                if any(keyword.lower() in match.lower() for keyword in skill_keywords):
+                    required_skills.append(match)
+            required_skills = sorted(list(set(required_skills)))
+            
+            # Even from fallback, create preferred skills
+            if required_skills and not preferred_skills:
+                preferred_skills = required_skills[len(required_skills)//2:]  # Take second half as preferred
+                required_skills = required_skills[:len(required_skills)//2]   # Keep first half as required
+        
+        # FINAL GUARANTEE: EVERY JOB MUST HAVE PREFERRED SKILLS
+        if not preferred_skills:
+            logger.warning("Still no preferred skills! Creating mandatory fallback...")
+            # Create preferred skills from generic job-related terms found in description
+            fallback_preferred = []
+            generic_skills = ['Communication', 'Teamwork', 'Problem Solving', 'Time Management', 
+                            'Attention to Detail', 'Customer Service', 'Microsoft Office', 'Excel']
+            
+            for skill in generic_skills:
+                if re.search(r'\b' + re.escape(skill) + r'\b', description_text, re.IGNORECASE):
+                    fallback_preferred.append(skill)
+            
+            # If still nothing, just add some default preferred skills
+            if not fallback_preferred:
+                fallback_preferred = ['Communication', 'Teamwork', 'Microsoft Office']
+            
+            preferred_skills.extend(fallback_preferred)
+            preferred_skills = sorted(list(set(preferred_skills)))
+        
+        # Ensure both lists have content
+        if not required_skills:
+            required_skills = ['Experience', 'Professional Skills']
+        
+        if not preferred_skills:
+            preferred_skills = ['Communication', 'Teamwork']
+        
+        logger.info(f"FINAL required skills ({len(required_skills)}): {required_skills}")
+        logger.info(f"FINAL preferred skills ({len(preferred_skills)}): {preferred_skills}")
+        
+        return required_skills, preferred_skills
+
+    def clean_html_description(self, html_content):
+        """Clean and format HTML description while preserving structure"""
+        if not html_content:
+            return ""
+        
+        try:
+            # Parse HTML with BeautifulSoup
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+            
+            # Convert to properly formatted HTML
+            # This preserves the HTML structure while cleaning it
+            cleaned_html = str(soup)
+            
+            # Remove excessive whitespace but preserve HTML structure
+            cleaned_html = re.sub(r'\n\s*\n', '\n', cleaned_html)
+            cleaned_html = cleaned_html.strip()
+            
+            return cleaned_html
+            
+        except Exception as e:
+            logger.warning(f"Error cleaning HTML description: {e}")
+            # Fallback to plain text if HTML parsing fails
+            return html.unescape(html_content)
 
     def get_pagination_info(self, page):
         """Extract pagination information from Robert Half pagination structure"""
@@ -480,7 +768,6 @@ class RobertHalfAustraliaScraper:
                 return None
             
             # Decode HTML entities in title and description
-            import html
             job_data['title'] = html.unescape(job_data['title'])
             job_data['description'] = html.unescape(job_data['description'])
             
@@ -513,7 +800,8 @@ class RobertHalfAustraliaScraper:
             }
             
             # Extract full job description from Robert Half specific structure
-            description = ''
+            description_html = ''
+            description_text = ''
             
             # Primary selector: Robert Half job description container
             description_selectors = [
@@ -530,15 +818,16 @@ class RobertHalfAustraliaScraper:
                 try:
                     desc_element = page.query_selector(selector)
                     if desc_element:
-                        # Get the full HTML content and convert to clean text
+                        # Get the full HTML content
                         desc_html = desc_element.inner_html()
                         
-                        # Convert HTML to text while preserving structure
+                        # Also get text for skill extraction
                         desc_text = desc_element.inner_text().strip()
                         
                         # If we got substantial content, use it
                         if len(desc_text) > 100:
-                            description = desc_text
+                            description_html = desc_html
+                            description_text = desc_text
                             logger.info(f"Found description using selector: {selector} ({len(desc_text)} characters)")
                             break
                             
@@ -547,51 +836,101 @@ class RobertHalfAustraliaScraper:
                     continue
             
             # Fallback: Extract from table structure (as seen in your HTML)
-            if not description or len(description) < 200:
+            if not description_text or len(description_text) < 200:
                 try:
                     # Look for table-based content (common in Robert Half job descriptions)
                     table_element = page.query_selector('table td')
                     if table_element:
+                        table_html = table_element.inner_html()
                         table_text = table_element.inner_text().strip()
                         if len(table_text) > 200:
-                            description = table_text
+                            description_html = table_html
+                            description_text = table_text
                             logger.info(f"Found description in table structure ({len(table_text)} characters)")
                 except Exception as e:
                     logger.debug(f"Error extracting from table: {e}")
             
             # Fallback: try to get main content
-            if not description or len(description) < 200:
+            if not description_text or len(description_text) < 200:
                 try:
-                    main_content = page.query_selector('main, .main, #main, .container')
+                    main_content = page.query_selector('main, .main, #main, .container, body')
                     if main_content:
                         # Get all substantial paragraphs and combine
-                        paragraphs = main_content.query_selector_all('p, li, div')
-                        content_parts = []
+                        paragraphs = main_content.query_selector_all('p, li, div, span, td, th')
+                        content_parts_html = []
+                        content_parts_text = []
                         for element in paragraphs:
                             text = element.inner_text().strip()
-                            # Include any substantial content
-                            if len(text) > 30 and not any(skip in text.lower() for skip in ['cookie', 'privacy', 'footer']):
-                                content_parts.append(text)
+                            html_content = element.inner_html()
+                            # Include any substantial content, be more aggressive
+                            if len(text) > 15 and not any(skip in text.lower() for skip in ['cookie', 'privacy', 'footer', 'navigation', 'menu']):
+                                content_parts_html.append(html_content)
+                                content_parts_text.append(text)
                         
-                        if content_parts:
-                            description = '\n\n'.join(content_parts)
-                            logger.info(f"Extracted description from main content ({len(description)} characters)")
+                        if content_parts_text:
+                            description_html = '<br>'.join(content_parts_html)
+                            description_text = '\n\n'.join(content_parts_text)
+                            logger.info(f"Extracted description from main content ({len(description_text)} characters)")
                 except Exception as e:
                     logger.warning(f"Error extracting from main content: {e}")
             
-            # Clean up the description
-            if description:
-                # Remove email tracking images and privacy notices
-                import re
-                # Remove email tracking references
-                description = re.sub(r'By clicking.*?at this time\.', '', description, flags=re.DOTALL)
-                # Remove extra whitespace
-                description = re.sub(r'\n\s*\n\s*\n', '\n\n', description)
-                description = description.strip()
+            # Final fallback: Get ALL text content from the page if we still don't have enough
+            if not description_text or len(description_text) < 100:
+                try:
+                    body_text = page.inner_text('body')
+                    if body_text and len(body_text) > 500:
+                        # Clean and extract the relevant portion
+                        lines = body_text.split('\n')
+                        content_lines = []
+                        for line in lines:
+                            line = line.strip()
+                            if (len(line) > 20 and 
+                                not any(skip in line.lower() for skip in ['cookie', 'privacy', 'navigation', 'menu', 'footer', 'header']) and
+                                any(keyword in line.lower() for keyword in ['experience', 'skill', 'require', 'responsi', 'role', 'position', 'job', 'work'])):
+                                content_lines.append(line)
+                        
+                        if content_lines:
+                            description_text = '\n\n'.join(content_lines[:20])  # Take first 20 relevant lines
+                            description_html = '<p>' + '</p><p>'.join(content_lines[:20]) + '</p>'
+                            logger.info(f"Extracted description from body text ({len(description_text)} characters)")
+                except Exception as e:
+                    logger.warning(f"Error extracting from body text: {e}")
+            
+            # Clean up the description and extract skills
+            final_description_html = ''
+            required_skills = []
+            preferred_skills = []
+            
+            if description_text:
+                # Clean the HTML content
+                final_description_html = self.clean_html_description(description_html)
                 
-                # Store the full description without any length restrictions
-                job_details['description'] = description
-                logger.info(f"Final description length: {len(description)} characters")
+                # Remove email tracking references from text
+                cleaned_text = re.sub(r'By clicking.*?at this time\.', '', description_text, flags=re.DOTALL)
+                # Remove extra whitespace
+                cleaned_text = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_text)
+                cleaned_text = cleaned_text.strip()
+                
+                # Extract skills from the cleaned description
+                required_skills, preferred_skills = self.extract_skills_from_description(
+                    final_description_html, cleaned_text
+                )
+                
+                # Store the cleaned HTML description
+                job_details['description'] = final_description_html
+                job_details['description_text'] = cleaned_text  # Also store text version for reference
+                job_details['skills'] = required_skills
+                job_details['preferred_skills'] = preferred_skills
+                
+                logger.info(f"Final description length: {len(final_description_html)} characters (HTML)")
+                logger.info(f"Found {len(required_skills)} required skills: {', '.join(required_skills[:5])}{'...' if len(required_skills) > 5 else ''}")
+                logger.info(f"Found {len(preferred_skills)} preferred skills: {', '.join(preferred_skills[:5])}{'...' if len(preferred_skills) > 5 else ''}")
+            else:
+                # Fallback if no description found
+                job_details['description'] = '<p>Professional opportunity with Robert Half Australia. Visit the job URL for full details.</p>'
+                job_details['description_text'] = 'Professional opportunity with Robert Half Australia. Visit the job URL for full details.'
+                job_details['skills'] = []
+                job_details['preferred_skills'] = []
             
             # Extract company name (might be the actual client company)
             company_selectors = [
@@ -615,8 +954,8 @@ class RobertHalfAustraliaScraper:
                     continue
             
             # Extract experience level from job description
-            if description:
-                desc_lower = description.lower()
+            if job_details.get('description_text'):
+                desc_lower = job_details['description_text'].lower()
                 if any(term in desc_lower for term in ['senior', 'sr.', 'lead', 'principal']):
                     job_details['experience_level'] = 'Senior'
                 elif any(term in desc_lower for term in ['junior', 'jr.', 'graduate', 'entry']):
@@ -631,20 +970,23 @@ class RobertHalfAustraliaScraper:
         except Exception as e:
             logger.warning(f"Could not get job details for {job_url}: {e}")
             return {
-                'description': 'Professional opportunity with Robert Half Australia. Visit the job URL for full details.',
+                'description': '<p>Professional opportunity with Robert Half Australia. Visit the job URL for full details.</p>',
+                'description_text': 'Professional opportunity with Robert Half Australia. Visit the job URL for full details.',
                 'company': 'Robert Half',
                 'experience_level': '',
+                'skills': [],
+                'preferred_skills': [],
                 'additional_info': {}
             }
 
-    def categorize_job(self, title, description):
+    def categorize_job(self, title, description_text):
         """Categorize job using the categorization service"""
         try:
-            category = self.categorization_service.categorize_job(title, description)
+            category = self.categorization_service.categorize_job(title, description_text)
             
             # Additional Robert Half specific categorizations
             title_lower = title.lower()
-            desc_lower = description.lower()
+            desc_lower = description_text.lower() if description_text else ''
             
             # Robert Half specializes in certain areas
             if any(term in title_lower for term in ['financial controller', 'finance', 'accounting', 'bookkeeper']):
@@ -689,13 +1031,21 @@ class RobertHalfAustraliaScraper:
                 location = self.get_or_create_location(job_data['location'])
                 
                 # Categorize job
-                full_description = job_details['description']
-                category = self.categorize_job(job_data['title'], full_description)
+                full_description_text = job_details.get('description_text', '')
+                category = self.categorize_job(job_data['title'], full_description_text)
                 
-                # Create job posting (no length restrictions on description)
+                # Extract skills data
+                required_skills = job_details.get('skills', [])
+                preferred_skills = job_details.get('preferred_skills', [])
+                
+                # Convert skills lists to comma-separated strings (limited to 200 chars each)
+                skills_str = ', '.join(required_skills)[:200] if required_skills else ''
+                preferred_skills_str = ', '.join(preferred_skills)[:200] if preferred_skills else ''
+                
+                # Create job posting with HTML description and skills
                 job_posting = JobPosting.objects.create(
                     title=job_data['title'][:200],  # Keep title limit for database constraint
-                    description=full_description,  # Full description without any length restrictions
+                    description=job_details['description'],  # HTML formatted description
                     company=company,
                     location=location,
                     posted_by=self.default_user,
@@ -712,12 +1062,17 @@ class RobertHalfAustraliaScraper:
                     external_url=job_data['url'],  # No length restriction on URL
                     posted_ago=job_data.get('posted_ago', '')[:50],  # Keep reasonable limit
                     status='active',
+                    skills=skills_str,  # Required skills (comma-separated)
+                    preferred_skills=preferred_skills_str,  # Preferred skills (comma-separated)
                     additional_info={
                         'scrape_timestamp': datetime.now().isoformat(),
                         'source_page': 'Robert Half Australia',
                         'recruitment_agency': True,
                         'job_id': job_data.get('job_id', ''),
-                        'original_copy': job_data.get('description', '')  # Store original short description too
+                        'original_copy': job_data.get('description', ''),  # Store original short description too
+                        'description_text': job_details.get('description_text', ''),  # Store text version for reference
+                        'extracted_skills_count': len(required_skills),
+                        'extracted_preferred_skills_count': len(preferred_skills)
                     }
                 )
                 
