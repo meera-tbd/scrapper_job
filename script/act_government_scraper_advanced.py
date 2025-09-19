@@ -625,6 +625,13 @@ class ACTGovernmentJobScraper:
                         # Wait for content to load
                         page.wait_for_timeout(3000)
                         
+                        # Extract closing date from the detail page
+                        if not job_data.get('closing_date'):
+                            closing_date = self.extract_closing_date_from_detail_page(page)
+                            if closing_date:
+                                job_data['closing_date'] = closing_date
+                                self.logger.debug(f"Extracted closing date: {closing_date}")
+                        
                         # Try to find the main position details container
                         position_details = page.query_selector('.col-md-8.position-details.no-padding')
                         if not position_details:
@@ -656,15 +663,22 @@ class ACTGovernmentJobScraper:
             return job_data.get('title', 'ACT Government Position')
     
     def extract_target_content_range(self, container):
-        """Extract all content from the position-details container directly."""
+        """Extract all content from the position-details container with HTML format."""
         try:
-            # Simply get all text content from the container
-            full_text = container.text_content()
+            # Get HTML content from the container
+            html_content = container.inner_html()
             
+            if html_content and html_content.strip():
+                # Clean and format the HTML content
+                cleaned_description = self.clean_extracted_html_content(html_content.strip())
+                self.logger.debug(f"Extracted full container HTML content: {len(cleaned_description)} characters")
+                return cleaned_description
+            
+            # Fallback to text content if HTML extraction fails
+            full_text = container.text_content()
             if full_text and full_text.strip():
-                # Clean the content and return it
                 cleaned_description = self.clean_extracted_content(full_text.strip())
-                self.logger.debug(f"Extracted full container content: {len(cleaned_description)} characters")
+                self.logger.debug(f"Extracted full container text content: {len(cleaned_description)} characters")
                 return cleaned_description
             
             return None
@@ -673,9 +687,44 @@ class ACTGovernmentJobScraper:
             self.logger.error(f"Error extracting container content: {e}")
             return None
     
+    def clean_extracted_html_content(self, html_content):
+        """Clean and format the extracted HTML content."""
+        try:
+            import re
+            
+            # Remove script and style elements
+            html_content = re.sub(r'<script.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+            html_content = re.sub(r'<style.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+            
+            # Clean up excessive whitespace while preserving HTML structure
+            html_content = re.sub(r'\s+', ' ', html_content)
+            html_content = re.sub(r'>\s+<', '><', html_content)
+            
+            # Ensure proper line breaks for paragraphs and lists
+            html_content = html_content.replace('</p>', '</p>\n')
+            html_content = html_content.replace('</li>', '</li>\n')
+            html_content = html_content.replace('</ul>', '</ul>\n')
+            html_content = html_content.replace('</ol>', '</ol>\n')
+            html_content = html_content.replace('</div>', '</div>\n')
+            html_content = html_content.replace('<br>', '<br>\n')
+            html_content = html_content.replace('<br/>', '<br/>\n')
+            html_content = html_content.replace('<br />', '<br />\n')
+            
+            # Remove excessive newlines
+            while '\n\n\n' in html_content:
+                html_content = html_content.replace('\n\n\n', '\n\n')
+            
+            return html_content.strip()
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning extracted HTML content: {e}")
+            return html_content
+
     def clean_extracted_content(self, content):
         """Clean and format the extracted content."""
         try:
+            import re
+            
             # Remove excessive whitespace
             lines = []
             for line in content.split('\n'):
@@ -685,6 +734,9 @@ class ACTGovernmentJobScraper:
             
             # Join lines back together
             cleaned_content = '\n'.join(lines)
+            
+            # Fix common text corruption issues
+            cleaned_content = self.fix_corrupted_text(cleaned_content)
             
             # Format bullet points for better readability
             cleaned_content = cleaned_content.replace('•', '\n•').replace('  •', ' •')
@@ -698,6 +750,278 @@ class ACTGovernmentJobScraper:
         except Exception as e:
             self.logger.error(f"Error cleaning extracted content: {e}")
             return content
+    
+    def fix_corrupted_text(self, text):
+        """Fix common text corruption issues in scraped content."""
+        try:
+            import re
+            
+            # Fix common corrupted patterns
+            corrupted_patterns = {
+                # Pattern: "Still heer some data" -> "Skills here some data" -> "Skills:"
+                r'\bStill\s+heer\s+some\s+data\b': 'Skills:',
+                r'\bSkils\s+Store\s+some\s+data\b': 'Skills:',
+                r'\bPreferred\s+SKisl\s+Stre\s+almoste\b': 'Preferred Skills:',
+                r'\bThis\s+Issue\s+coem\s+So\b': '',
+                
+                # Fix other common OCR/extraction errors
+                r'\bheer\b': 'here',
+                r'\bSkils\b': 'Skills',
+                r'\bSKisl\b': 'Skills',
+                r'\bStre\b': 'Store',
+                r'\balmoste\b': 'almost',
+                r'\bcoem\b': 'come',
+                r'\bsisue\b': 'issue',
+                
+                # Fix spacing around colons
+                r'\s*:\s*': ': ',
+                
+                # Fix repeated words/characters
+                r'\b(\w+)\s+\1\b': r'\1',  # Remove repeated words
+                
+                # Clean up incomplete words at the end of lines
+                r'\b[A-Za-z]{1,2}\s*$': '',  # Remove trailing 1-2 letter words
+                
+                # Fix section headers
+                r'\b(Skills?|Qualifications?|Requirements?|Responsibilities?)\s*[:\-]?\s*': r'\1:\n',
+                r'\b(Preferred|Essential|Desirable)\s+(Skills?|Qualifications?|Requirements?)\s*[:\-]?\s*': r'\1 \2:\n',
+            }
+            
+            # Apply all pattern fixes
+            for pattern, replacement in corrupted_patterns.items():
+                text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            
+            # Remove lines that are clearly corrupted (too short or nonsensical)
+            lines = text.split('\n')
+            cleaned_lines = []
+            
+            for line in lines:
+                line = line.strip()
+                if line:
+                    # Skip lines that are too short and don't contain meaningful content
+                    if len(line) < 3:
+                        continue
+                    
+                    # Skip lines with too many repeated characters
+                    if len(set(line.replace(' ', ''))) < 3:
+                        continue
+                    
+                    # Skip lines that are mostly non-alphabetic characters
+                    alpha_chars = sum(1 for c in line if c.isalpha())
+                    if alpha_chars < len(line) * 0.5 and len(line) > 10:
+                        continue
+                    
+                    cleaned_lines.append(line)
+            
+            return '\n'.join(cleaned_lines)
+            
+        except Exception as e:
+            self.logger.error(f"Error fixing corrupted text: {e}")
+            return text
+    
+    def validate_description_content(self, description):
+        """Validate and clean description content before processing."""
+        try:
+            if not description or not isinstance(description, str):
+                return ""
+            
+            # Remove very short or corrupted content
+            if len(description.strip()) < 10:
+                return ""
+            
+            # Check for excessive corruption (too many non-alphabetic characters)
+            alpha_chars = sum(1 for c in description if c.isalpha())
+            total_chars = len(description.replace(' ', '').replace('\n', ''))
+            
+            if total_chars > 0 and alpha_chars / total_chars < 0.6:
+                self.logger.warning("Description appears corrupted, using fallback")
+                return ""
+            
+            # Additional cleaning for skills extraction
+            description = description.replace('\n', ' ')
+            description = ' '.join(description.split())  # Normalize whitespace
+            
+            return description
+            
+        except Exception as e:
+            self.logger.error(f"Error validating description content: {e}")
+            return ""
+    
+    def validate_job_data(self, title, description):
+        """Validate job data before saving to database."""
+        try:
+            # Check title validity
+            if not title or len(title.strip()) < 3:
+                return False
+            
+            # Check for corrupted title patterns
+            corrupted_title_patterns = [
+                'still heer', 'skils store', 'preferred skisl', 'this issue coem',
+                'almoste', 'sisue'
+            ]
+            
+            title_lower = title.lower()
+            for pattern in corrupted_title_patterns:
+                if pattern in title_lower:
+                    self.logger.warning(f"Corrupted title detected: {title}")
+                    return False
+            
+            # Check description validity
+            if description:
+                if len(description.strip()) < 10:
+                    return False
+                
+                # Check for excessive corruption in description
+                alpha_chars = sum(1 for c in description if c.isalpha())
+                total_chars = len(description.replace(' ', '').replace('\n', ''))
+                
+                if total_chars > 0 and alpha_chars / total_chars < 0.5:
+                    self.logger.warning(f"Corrupted description detected for: {title}")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error validating job data: {e}")
+            return False
+    
+    def has_meaningful_description_content(self, description):
+        """Check if description contains meaningful job content vs just basic job info."""
+        try:
+            if not description or len(description.strip()) < 50:
+                return False
+            
+            # Check for fallback description patterns (generated by generate_fallback_description)
+            fallback_indicators = [
+                '**Position:**', '**Employment Type:**', '**Grade:**', 
+                '**Department:**', '**Salary Range:**', '**Position Number:**'
+            ]
+            
+            # If description mostly contains fallback patterns, it's not meaningful
+            fallback_count = sum(1 for indicator in fallback_indicators if indicator in description)
+            if fallback_count >= 3:  # Likely a fallback description
+                return False
+            
+            # Check for meaningful job description content
+            meaningful_indicators = [
+                'responsibilities', 'duties', 'requirements', 'qualifications', 
+                'skills', 'experience', 'about this role', 'key accountabilities',
+                'what you will do', 'what we offer', 'selection criteria',
+                'essential requirements', 'desirable requirements', 'knowledge',
+                'ability to', 'demonstrated', 'proven experience'
+            ]
+            
+            description_lower = description.lower()
+            meaningful_count = sum(1 for indicator in meaningful_indicators if indicator in description_lower)
+            
+            # Consider it meaningful if it has at least 2 meaningful indicators
+            # and is longer than basic job info
+            return meaningful_count >= 2 and len(description) > 200
+            
+        except Exception as e:
+            self.logger.error(f"Error checking description meaningfulness: {e}")
+            return False
+    
+    def get_title_based_skills(self, title):
+        """Get skills based on job title for ACT Government positions."""
+        try:
+            title_lower = title.lower()
+            
+            # Healthcare roles
+            if any(word in title_lower for word in ['nurse', 'clinical', 'medical', 'health']):
+                return (['Healthcare', 'Patient Care', 'Communication', 'Medical Knowledge'], 
+                       ['Leadership', 'Technology', 'Team Collaboration'])
+            
+            # Education roles
+            elif any(word in title_lower for word in ['teacher', 'education', 'academic', 'learning']):
+                return (['Teaching', 'Communication', 'Curriculum Development', 'Student Assessment'], 
+                       ['Technology Integration', 'Research', 'Professional Development'])
+            
+            # Administrative/Officer roles
+            elif any(word in title_lower for word in ['officer', 'assistant', 'coordinator', 'administrator']):
+                return (['Communication', 'Microsoft Office', 'Administration', 'Data Entry'], 
+                       ['Project Management', 'Stakeholder Management', 'Policy Knowledge'])
+            
+            # Management/Senior roles
+            elif any(word in title_lower for word in ['manager', 'director', 'senior', 'lead', 'supervisor']):
+                return (['Leadership', 'Management', 'Communication', 'Strategic Planning'], 
+                       ['Stakeholder Management', 'Budget Management', 'Team Development'])
+            
+            # Technical/IT roles
+            elif any(word in title_lower for word in ['it', 'technical', 'system', 'data', 'analyst']):
+                return (['Technical Skills', 'Data Analysis', 'Problem Solving', 'Microsoft Office'], 
+                       ['Project Management', 'Training', 'Documentation'])
+            
+            # Policy/Legal roles
+            elif any(word in title_lower for word in ['policy', 'legal', 'compliance', 'regulatory']):
+                return (['Policy Development', 'Legal Knowledge', 'Research', 'Communication'], 
+                       ['Stakeholder Engagement', 'Project Management', 'Analysis'])
+            
+            # Finance/HR roles
+            elif any(word in title_lower for word in ['finance', 'hr', 'human resources', 'payroll', 'accounting']):
+                return (['Financial Analysis', 'Administration', 'Communication', 'Attention to Detail'], 
+                       ['HR Knowledge', 'Policy Implementation', 'Systems'])
+            
+            # General government position
+            else:
+                return (['Communication', 'Microsoft Office', 'Administration'], 
+                       ['Project Management', 'Government Knowledge', 'Customer Service'])
+            
+        except Exception as e:
+            self.logger.error(f"Error getting title-based skills: {e}")
+            return (['Communication', 'Microsoft Office'], ['Project Management'])
+    
+    def get_role_context_description(self, title):
+        """Get role-specific context description based on job title."""
+        try:
+            title_lower = title.lower()
+            
+            if any(word in title_lower for word in ['nurse', 'clinical', 'medical']):
+                return "Provide quality healthcare services to the ACT community. This role involves direct patient care, clinical assessments, and working collaboratively with multidisciplinary healthcare teams to ensure optimal patient outcomes."
+            
+            elif any(word in title_lower for word in ['teacher', 'education', 'academic']):
+                return "Support education excellence in the ACT. This role involves curriculum delivery, student assessment, and contributing to educational programs that prepare students for their future."
+            
+            elif any(word in title_lower for word in ['officer', 'assistant', 'coordinator']):
+                return "Support the delivery of government services to the ACT community. This role involves administrative tasks, stakeholder engagement, and ensuring efficient operations within your department."
+            
+            elif any(word in title_lower for word in ['manager', 'director', 'senior']):
+                return "Lead and manage team operations to deliver high-quality government services. This role involves strategic planning, team leadership, and ensuring service delivery meets community needs."
+            
+            elif any(word in title_lower for word in ['analyst', 'data', 'research']):
+                return "Support evidence-based decision making through data analysis and research. This role involves collecting, analyzing, and interpreting data to inform policy and service delivery."
+            
+            elif any(word in title_lower for word in ['policy', 'legal', 'compliance']):
+                return "Develop and implement policies that serve the ACT community. This role involves policy analysis, stakeholder consultation, and ensuring compliance with legislative requirements."
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error getting role context: {e}")
+            return None
+    
+    def get_department_context(self, department):
+        """Get department-specific context."""
+        try:
+            dept_lower = department.lower()
+            
+            if 'health' in dept_lower:
+                return "Canberra Health Services is committed to providing exceptional healthcare to the ACT and surrounding regions, focusing on patient-centered care and clinical excellence."
+            
+            elif 'education' in dept_lower:
+                return "The Education Directorate delivers quality education services across the ACT, supporting students from early childhood through to senior secondary education."
+            
+            elif 'transport' in dept_lower:
+                return "Transport Canberra and City Services maintains and improves the Territory's transport infrastructure and city services for the community."
+            
+            elif 'environment' in dept_lower:
+                return "Environment, Planning and Sustainable Development Directorate works to create a sustainable, liveable city through strategic planning and environmental management."
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error getting department context: {e}")
+            return None
     
     def extract_basic_job_info(self, container):
         """Extract basic job information from the position details."""
@@ -850,10 +1174,16 @@ class ACTGovernmentJobScraper:
             return None
     
     def generate_fallback_description(self, job_data):
-        """Generate description from available job data."""
+        """Generate description from available job data with enhanced content."""
         description_parts = []
         
-        description_parts.append(f"**Position:** {job_data.get('title', '')}")
+        title = job_data.get('title', '')
+        description_parts.append(f"**Position:** {title}")
+        
+        # Add role-specific context based on title
+        role_context = self.get_role_context_description(title)
+        if role_context:
+            description_parts.append(f"\n**About this Role:**\n{role_context}")
         
         if job_data.get('employment_type'):
             description_parts.append(f"**Employment Type:** {job_data['employment_type']}")
@@ -862,7 +1192,12 @@ class ACTGovernmentJobScraper:
             description_parts.append(f"**Grade:** {job_data['employment_grade']}")
         
         if job_data.get('department'):
-            description_parts.append(f"**Department:** {job_data['department']}")
+            department = job_data['department']
+            description_parts.append(f"**Department:** {department}")
+            # Add department-specific context
+            dept_context = self.get_department_context(department)
+            if dept_context:
+                description_parts.append(dept_context)
         
         if job_data.get('salary_grade'):
             description_parts.append(f"**Salary Range:** {job_data['salary_grade']}")
@@ -870,12 +1205,188 @@ class ACTGovernmentJobScraper:
         if job_data.get('position_number'):
             description_parts.append(f"**Position Number:** {job_data['position_number']}")
         
+        # Add general ACT Government context
+        description_parts.append(f"\n**About ACT Government Careers:**")
+        description_parts.append("Join the ACT Public Service and contribute to delivering essential services to the Canberra community. We offer professional development opportunities, competitive benefits, and the chance to make a real difference in people's lives.")
+        
         if job_data.get('closing_date'):
             description_parts.append(f"**Applications close:** {job_data['closing_date']}")
         
         description_parts.append("\n**Note:** This is an ACT Government position. All vacancies close at 11:59pm on the advertised closing date unless otherwise specified.")
         
         return '\n\n'.join(description_parts)
+    
+    def extract_closing_date_from_detail_page(self, page):
+        """Extract job closing date from the detail page."""
+        try:
+            # Look for closing date in various formats and locations
+            closing_date_selectors = [
+                # Common patterns for closing dates
+                'text=Closes:',
+                'text=Applications close:',
+                'text=Closing date:',
+                '[data-testid*="closing"]',
+                '[data-testid*="deadline"]',
+                '.closing-date',
+                '.application-deadline'
+            ]
+            
+            for selector in closing_date_selectors:
+                try:
+                    element = page.query_selector(selector)
+                    if element:
+                        # Get the parent or next sibling that contains the date
+                        parent = element.evaluate('el => el.parentNode')
+                        if parent:
+                            text_content = parent.text_content()
+                            # Extract date from text like "Closes: 26 September 2025"
+                            date_match = re.search(r'(\d{1,2}\s+\w+\s+\d{4})', text_content)
+                            if date_match:
+                                return date_match.group(1)
+                except:
+                    continue
+            
+            # Look for dates in the main content
+            try:
+                main_content = page.query_selector('.position-details')
+                if main_content:
+                    content_text = main_content.text_content()
+                    # Look for patterns like "Closes: 26 September 2025"
+                    date_patterns = [
+                        r'(?:Closes?|Applications?\s+close?|Closing\s+date|Deadline):\s*(\d{1,2}\s+\w+\s+\d{4})',
+                        r'(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})'
+                    ]
+                    
+                    for pattern in date_patterns:
+                        match = re.search(pattern, content_text, re.IGNORECASE)
+                        if match:
+                            return match.group(1)
+            except:
+                pass
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Error extracting closing date from detail page: {e}")
+            return None
+    
+    def generate_skills_from_description(self, title, description):
+        """Generate skills and preferred skills from job title and description."""
+        try:
+            # Validate inputs
+            if not title:
+                title = ""
+            if not description:
+                description = ""
+            
+            # Clean and validate description first
+            description = self.validate_description_content(description)
+            
+            # Check if we have a meaningful description vs just fallback data
+            has_meaningful_description = self.has_meaningful_description_content(description)
+            
+            # Combine title and description for analysis
+            full_text = f"{title} {description}".lower()
+            
+            self.logger.debug(f"Generating skills for: {title[:50]}...")
+            self.logger.debug(f"Has meaningful description: {has_meaningful_description}")
+            self.logger.debug(f"Description length: {len(description)} chars")
+            
+            # Common skills keywords for ACT Government jobs
+            skill_keywords = {
+                # Technical skills
+                'microsoft office': ['microsoft office', 'ms office', 'office suite', 'excel', 'word', 'powerpoint', 'outlook'],
+                'data analysis': ['data analysis', 'data analytics', 'excel', 'reporting', 'dashboards'],
+                'project management': ['project management', 'project coordination', 'project planning', 'pmp'],
+                'communication': ['communication', 'written communication', 'verbal communication', 'stakeholder engagement'],
+                'customer service': ['customer service', 'client service', 'customer support', 'service delivery'],
+                'policy development': ['policy development', 'policy analysis', 'policy writing', 'policy implementation'],
+                'research': ['research', 'research methodology', 'data collection', 'analysis'],
+                'finance': ['finance', 'financial analysis', 'budgeting', 'accounting', 'financial management'],
+                'hr': ['human resources', 'hr', 'recruitment', 'staff management', 'workforce planning'],
+                'it': ['information technology', 'it support', 'software', 'systems', 'database'],
+                'healthcare': ['clinical', 'nursing', 'medical', 'patient care', 'health services'],
+                'education': ['teaching', 'education', 'curriculum', 'learning', 'training'],
+                'legal': ['legal', 'legislation', 'compliance', 'regulatory', 'law'],
+                'administration': ['administration', 'administrative', 'clerical', 'office management'],
+                'leadership': ['leadership', 'management', 'supervision', 'team leadership'],
+                
+                # Government specific
+                'government': ['government', 'public service', 'public sector', 'parliamentary'],
+                'compliance': ['compliance', 'audit', 'risk management', 'governance'],
+                'stakeholder management': ['stakeholder', 'consultation', 'engagement', 'liaison'],
+            }
+            
+            # Extract skills found in the text
+            found_skills = []
+            for skill_name, keywords in skill_keywords.items():
+                for keyword in keywords:
+                    if keyword in full_text:
+                        if skill_name not in found_skills:
+                            found_skills.append(skill_name.title())
+                        break
+            
+            # Separate core vs preferred skills based on context
+            core_skills = []
+            preferred_skills = []
+            
+            # Check context around skills to determine if they're required or preferred
+            for skill in found_skills:
+                skill_lower = skill.lower()
+                
+                # Look for context indicators
+                essential_indicators = ['essential', 'required', 'must have', 'mandatory', 'necessary']
+                preferred_indicators = ['preferred', 'desirable', 'advantageous', 'beneficial', 'nice to have']
+                
+                # Check if skill appears in essential context
+                is_essential = any(indicator in full_text for indicator in essential_indicators)
+                is_preferred = any(indicator in full_text for indicator in preferred_indicators)
+                
+                # Default categorization based on job type
+                if 'senior' in title.lower() or 'manager' in title.lower() or 'director' in title.lower():
+                    if skill_lower in ['leadership', 'management', 'stakeholder management', 'communication']:
+                        core_skills.append(skill)
+                    else:
+                        preferred_skills.append(skill)
+                elif 'officer' in title.lower() or 'assistant' in title.lower():
+                    if skill_lower in ['communication', 'microsoft office', 'administration']:
+                        core_skills.append(skill)
+                    else:
+                        preferred_skills.append(skill)
+                else:
+                    # Default distribution
+                    if len(core_skills) < 4:
+                        core_skills.append(skill)
+                    else:
+                        preferred_skills.append(skill)
+            
+            # Handle cases where no skills were found or we don't have meaningful description
+            if not core_skills and not preferred_skills:
+                if has_meaningful_description:
+                    self.logger.warning(f"No skills extracted from meaningful description for: {title[:50]}")
+                else:
+                    self.logger.debug(f"Using title-based skills for: {title[:50]} (no meaningful description)")
+                
+                # Enhanced fallback skills based on job title and government context
+                core_skills, preferred_skills = self.get_title_based_skills(title)
+            
+            elif not has_meaningful_description:
+                # If we found some skills but don't have meaningful description, log it
+                self.logger.debug(f"Skills generated from title/basic info only for: {title[:50]}")
+            else:
+                # We have both meaningful description and extracted skills
+                self.logger.debug(f"Skills generated from meaningful description for: {title[:50]}")
+            
+            # Format as comma-separated strings
+            skills_str = ', '.join(core_skills[:5])  # Limit to 5 core skills
+            preferred_skills_str = ', '.join(preferred_skills[:5])  # Limit to 5 preferred skills
+            
+            return skills_str, preferred_skills_str
+            
+        except Exception as e:
+            self.logger.error(f"Error generating skills from description: {e}")
+            # Fallback skills
+            return 'Communication, Microsoft Office', 'Project Management'
     
     def save_job_to_database_sync(self, job_data):
         """Synchronous database save function."""
@@ -969,6 +1480,15 @@ class ACTGovernmentJobScraper:
                 else:
                     description = self.fetch_detailed_description(job_data, None)
                 
+                # Validate and clean job data before saving
+                job_title = job_data.get('title', '').strip()
+                if not self.validate_job_data(job_title, description):
+                    self.logger.warning(f"Job data validation failed for: {job_title}")
+                    return False
+                
+                # Generate skills from description
+                skills_str, preferred_skills_str = self.generate_skills_from_description(job_title, description)
+                
                 # Create JobPosting
                 job_posting = JobPosting.objects.create(
                     title=job_data.get('title', ''),
@@ -993,6 +1513,9 @@ class ACTGovernmentJobScraper:
                     posted_ago='',
                     date_posted=date_posted,
                     tags=job_data.get('department', ''),
+                    job_closing_date=job_data.get('closing_date', ''),
+                    skills=skills_str,
+                    preferred_skills=preferred_skills_str,
                     additional_info={
                         'employment_type': job_data.get('employment_type', ''),
                         'employment_grade': job_data.get('employment_grade', ''),
@@ -1001,7 +1524,7 @@ class ACTGovernmentJobScraper:
                         'department': job_data.get('department', ''),
                         'advertised_date': job_data.get('advertised_date', ''),
                         'salary_data': job_data.get('salary_data', ''),
-                        'scraper_version': '2.0'
+                        'scraper_version': '2.1'
                     }
                 )
                 
@@ -1009,6 +1532,9 @@ class ACTGovernmentJobScraper:
                 self.logger.info(f"  Category: {job_posting.job_category}")
                 self.logger.info(f"  Location: {job_posting.location.name}")
                 self.logger.info(f"  Salary: {job_posting.salary_display}")
+                self.logger.info(f"  Closing Date: {job_posting.job_closing_date or 'Not specified'}")
+                self.logger.info(f"  Skills: {job_posting.skills or 'Not specified'}")
+                self.logger.info(f"  Preferred Skills: {job_posting.preferred_skills or 'Not specified'}")
                 
                 self.jobs_saved += 1
                 return True

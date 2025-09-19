@@ -372,6 +372,28 @@ class APSJobsAustraliaScraper:
             # Extract job type and location from footer
             footer_data = self.extract_footer_data_from_card(card_element)
             
+            # Additional location fallback if footer didn't find location
+            if footer_data.get('location') == 'Not specified':
+                try:
+                    # Search entire card for location data
+                    card_text = card_element.inner_text()
+                    location_patterns = [
+                        r'(Adelaide\s+SA,\s+Brisbane\s+QLD,\s+Canberra\s+ACT,\s+Darwin\s+NT,\s+Hobart\s+TAS,\s+Melbourne\s+VIC,\s+Perth\s+WA,\s+Sydney\s+NSW,\s+Townsville\s+QLD)',
+                        r'(Adelaide\s+SA|Brisbane\s+QLD|Canberra\s+ACT|Darwin\s+NT|Hobart\s+TAS|Melbourne\s+VIC|Perth\s+WA|Sydney\s+NSW|Townsville\s+QLD)',
+                        r'(Adelaide|Brisbane|Canberra|Darwin|Hobart|Melbourne|Perth|Sydney|Townsville)',
+                        r'([A-Z][a-z]+\s+(?:NSW|VIC|QLD|SA|WA|TAS|NT|ACT))',
+                        r'(Multiple\s+locations?|Various\s+locations?|Multiple\s+states?)'
+                    ]
+                    
+                    for pattern in location_patterns:
+                        match = re.search(pattern, card_text, re.IGNORECASE)
+                        if match:
+                            footer_data['location'] = match.group(1)
+                            logger.debug(f"Card fallback: Found location '{footer_data['location']}' in card text")
+                            break
+                except Exception as e:
+                    logger.debug(f"Error in card location fallback: {e}")
+            
             # Categorize job
             job_category = self.categorize_aps_job(title, "")
             
@@ -383,7 +405,7 @@ class APSJobsAustraliaScraper:
                 'title': title,
                 'company_name': company,
                 'location': footer_data.get('location', 'Not specified'),
-                'description': None,  # Will be filled later from detail page
+                'description': None,  # Will be filled later from detail page (HTML)
                 'salary_text': salary.get('raw_text', 'Not specified'),
                 'salary_min': salary.get('min_amount'),
                 'salary_max': salary.get('max_amount'),
@@ -391,6 +413,10 @@ class APSJobsAustraliaScraper:
                 'salary_type': 'yearly',
                 'job_type': footer_data.get('job_type', 'full_time'),
                 'posted_date': None,
+                'job_closing_date': None,
+                'skills': '',
+                'preferred_skills': '',
+                'company_website': None,
                 'external_url': job_url,
                 'external_source': 'apsjobs.gov.au',
                 'job_category': job_category,
@@ -474,36 +500,76 @@ class APSJobsAustraliaScraper:
             # Find footer element
             footer = card_element.query_selector("footer.job_listing__card--footer")
             if not footer:
+                logger.debug("No footer found with selector 'footer.job_listing__card--footer'")
                 return footer_data
             
             # Extract all footer divs
             footer_divs = footer.query_selector_all("div")
+            logger.debug(f"Found {len(footer_divs)} footer divs")
             
-            for div in footer_divs:
+            for i, div in enumerate(footer_divs):
                 try:
                     # Get the label to identify what this div contains
                     label_element = div.query_selector("p.content__label.content__text--quiet")
                     if not label_element:
-                        continue
+                        # Try alternative label selectors
+                        label_element = div.query_selector("p.content__label") or div.query_selector("p[class*='label']")
+                        if not label_element:
+                            logger.debug(f"Footer div {i}: No label element found")
+                            continue
                         
                     label_text = label_element.inner_text().strip().lower()
+                    logger.debug(f"Footer div {i}: Found label '{label_text}'")
                     
-                    # Get the value (second p element)
+                    # Get the value (second p element or any p not matching label)
                     value_element = div.query_selector("p:not(.content__label)")
                     if not value_element:
+                        # Try to get any other p element in the div
+                        all_p_elements = div.query_selector_all("p")
+                        if len(all_p_elements) > 1:
+                            value_element = all_p_elements[1]  # Take the second p element
+                        elif len(all_p_elements) == 1 and all_p_elements[0] != label_element:
+                            value_element = all_p_elements[0]
+                            
+                    if not value_element:
+                        logger.debug(f"Footer div {i}: No value element found")
                         continue
                         
                     value_text = value_element.inner_text().strip()
+                    logger.debug(f"Footer div {i}: Found value '{value_text}'")
                     
                     # Map based on label
-                    if 'opportunity type' in label_text:
+                    if 'opportunity type' in label_text or 'job type' in label_text:
                         footer_data['job_type'] = self.normalize_aps_job_type(value_text)
+                        logger.debug(f"Footer div {i}: Set job_type to '{footer_data['job_type']}'")
                     elif 'location' in label_text:
                         footer_data['location'] = value_text
+                        logger.debug(f"Footer div {i}: Set location to '{value_text}'")
                         
                 except Exception as e:
-                    logger.debug(f"Error processing footer div: {e}")
+                    logger.debug(f"Error processing footer div {i}: {e}")
                     continue
+            
+            # Additional fallback: look for location data in any footer text
+            if footer_data['location'] == 'Not specified':
+                try:
+                    footer_text = footer.inner_text()
+                    # Look for common Australian location patterns
+                    location_patterns = [
+                        r'(Adelaide\s+SA|Brisbane\s+QLD|Canberra\s+ACT|Darwin\s+NT|Hobart\s+TAS|Melbourne\s+VIC|Perth\s+WA|Sydney\s+NSW|Townsville\s+QLD)',
+                        r'(Adelaide|Brisbane|Canberra|Darwin|Hobart|Melbourne|Perth|Sydney|Townsville)',
+                        r'([A-Z][a-z]+\s+(?:NSW|VIC|QLD|SA|WA|TAS|NT|ACT))',
+                        r'(Multiple\s+locations?|Various\s+locations?|Multiple\s+states?)'
+                    ]
+                    
+                    for pattern in location_patterns:
+                        match = re.search(pattern, footer_text, re.IGNORECASE)
+                        if match:
+                            footer_data['location'] = match.group(1)
+                            logger.debug(f"Footer fallback: Found location '{footer_data['location']}' using pattern")
+                            break
+                except Exception as e:
+                    logger.debug(f"Error in footer fallback location extraction: {e}")
                     
         except Exception as e:
             logger.debug(f"Error extracting footer data: {e}")
@@ -575,55 +641,52 @@ class APSJobsAustraliaScraper:
         return None
 
     def extract_description_from_detail_page(self, page, job_url):
-        """Extract full job description from the detail page using content blocks."""
+        """Extract job description as PLAIN TEXT (legacy)."""
+        try:
+            # Delegate to the HTML-aware extractor and return the text portion for backward-compat
+            data = self.extract_description_html_and_text(page, job_url)
+            return data.get('text') or "No description available"
+        except Exception as e:
+            logger.error(f"[DESCRIPTION] Error extracting description from {job_url}: {e}")
+            return "Description extraction failed"
+
+    def extract_description_html_and_text(self, page, job_url):
+        """Extract full job description from the detail page and return both HTML and plain text.
+
+        Returns dict: {'html': str, 'text': str}
+        """
         try:
             logger.info(f"[DESCRIPTION] Visiting detail page for description: {job_url}")
             page.goto(job_url, wait_until='networkidle', timeout=60000)
-            
-            # Wait for content to load
             self.human_delay(2, 4)
             
-            # Extract description from job_detail__content--block elements (SELECTIVE APPROACH)
-            description_text = ""
-            
-            # Look for content blocks ONLY within the main job detail container
-            # Target: parent .job_detail__content -> child .job_detail__content--block
             main_container = page.query_selector("article.job_detail__content")
-            content_blocks = []
+            html_chunks = []
+            text_chunks = []
             
+            content_blocks = []
             if main_container:
-                # Get content blocks only from within the main job detail article
                 content_blocks = main_container.query_selector_all(".job_detail__content--block")
                 logger.debug(f"[DESCRIPTION] Found main container with {len(content_blocks)} content blocks")
             else:
-                # Fallback: look for content blocks anywhere (previous behavior)
                 content_blocks = page.query_selector_all(".job_detail__content--block")
                 logger.debug(f"[DESCRIPTION] No main container found, using all content blocks: {len(content_blocks)}")
             
             if content_blocks:
-                logger.debug(f"[DESCRIPTION] Found {len(content_blocks)} content blocks")
-                
                 for i, block in enumerate(content_blocks):
                     try:
-                        # Extract ALL content from the block (headings + rich text + everything)
+                        block_html = block.inner_html()
                         block_text = block.inner_text().strip()
-                        
-                        if block_text and len(block_text) > 20:  # Has substantial content
-                            description_text += block_text + "\n\n"
-                            logger.debug(f"[DESCRIPTION] Extracted content from block {i + 1}: {len(block_text)} chars")
-                        else:
-                            logger.debug(f"[DESCRIPTION] Block {i + 1} is empty or too short")
-                            
+                        if block_text and len(block_text) > 20:
+                            html_chunks.append(block_html)
+                            text_chunks.append(block_text)
                     except Exception as e:
                         logger.debug(f"Error extracting from content block {i + 1}: {e}")
-                        continue
-            
-            # Fallback to other selectors if no content blocks found
-            if not description_text:
-                logger.debug("[DESCRIPTION] No content blocks found, trying fallback selectors")
-                
+
+            # Fallback selectors
+            if not text_chunks:
                 fallback_selectors = [
-                    "article.job_detail__content",  # Main article container
+                    "article.job_detail__content",
                     ".job-description",
                     "[class*='description']",
                     ".job-details", 
@@ -633,31 +696,384 @@ class APSJobsAustraliaScraper:
                     "main",
                     "article"
                 ]
-                
                 for selector in fallback_selectors:
                     try:
                         element = page.query_selector(selector)
                         if element:
                             text = element.inner_text().strip()
+                            html = element.inner_html()
                             if len(text) > 200:
-                                description_text = text
-                                logger.debug(f"[DESCRIPTION] Found description using fallback selector: {selector}")
+                                text_chunks = [text]
+                                html_chunks = [html]
                                 break
                     except Exception:
                         continue
             
-            # Clean and format the description
-            if description_text:
-                description_text = self.clean_description_text(description_text)
-                logger.info(f"[DESCRIPTION] Extracted description ({len(description_text)} chars)")
-                return description_text
+            description_html = "\n".join(html_chunks).strip()
+            description_text = self.clean_description_text("\n\n".join(text_chunks).strip()) if text_chunks else ""
+
+            if not description_html and description_text:
+                # Wrap plain text to simple paragraph to keep HTML format contract
+                description_html = f"<p>{description_text}</p>"
+
+            # Append Contact card (bottom box) as HTML if present
+            try:
+                contact_html, contact_text = self.extract_contact_card_html(page)
+                if contact_html:
+                    description_html = (description_html + "\n" + contact_html).strip()
+                if contact_text:
+                    # Add a plain-text summary for keywording
+                    description_text = (description_text + "\n\n" + contact_text).strip()
+            except Exception:
+                pass
+
+            if description_html:
+                logger.info(f"[DESCRIPTION] Extracted description HTML ({len(description_html)} chars)")
             else:
                 logger.warning("[DESCRIPTION] No description found on detail page")
-                return "No description available"
                 
+            return {'html': description_html or "", 'text': description_text or ""}
         except Exception as e:
-            logger.error(f"[DESCRIPTION] Error extracting description from {job_url}: {e}")
-            return "Description extraction failed"
+            logger.error(f"[DESCRIPTION] Error extracting description (HTML) from {job_url}: {e}")
+            return {'html': '', 'text': ''}
+
+    def extract_contact_card_html(self, page):
+        """Extract the bottom contact card's HTML and a plain-text summary.
+
+        Returns tuple: (html, text)
+        """
+        # Try robust selectors that look for blocks containing key labels
+        candidate_selectors = [
+            "div:has-text('Vacancy Number'):has-text('Contact')",
+            "section:has-text('Vacancy Number'):has-text('Contact')",
+            "article:has-text('Vacancy Number'):has-text('Contact')",
+            "div:has-text('Contact Phone'):has-text('Contact Email')",
+        ]
+        best_html = ''
+        best_len = None
+        for sel in candidate_selectors:
+            try:
+                nodes = page.query_selector_all(sel)
+                for n in nodes or []:
+                    text = (n.inner_text() or '').strip()
+                    html = n.inner_html()
+                    # Require that this node looks like the compact contact card
+                    if html and 'vacancy number' in text.lower() and 'contact' in text.lower():
+                        ln = len(html)
+                        # Prefer the smallest node over very large article-level nodes
+                        if (best_len is None or ln < best_len) and ln < 4000:
+                            best_html = html
+                            best_len = ln
+            except Exception:
+                continue
+
+        # If we captured innerHtml, wrap it for clarity
+        if best_html:
+            wrapped_html = f"<div class=\"aps-contact-card\">{best_html}</div>"
+            plain = ''
+            try:
+                # Build plain text from the chosen HTML by temporarily injecting it into the DOM is heavy;
+                # instead, take inner_text of the same node if possible
+                plain_node = None
+                for sel in candidate_selectors:
+                    nodes = page.query_selector_all(sel)
+                    for n in nodes or []:
+                        if n.inner_html() == best_html:
+                            plain_node = n
+                            break
+                    if plain_node:
+                        break
+                if plain_node:
+                    plain = self.clean_description_text(plain_node.inner_text())
+            except Exception:
+                pass
+            return wrapped_html, plain
+
+        # Fallback: build a small table from label/value pairs
+        labels = [
+            'Contact', 'Contact Phone', 'Contact Email', 'Agency Employment Act',
+            'Website', 'Position Number', 'Vacancy Number'
+        ]
+        rows = []
+        for label in labels:
+            try:
+                el = page.query_selector(f"xpath=//*[self::p or self::div or self::span][normalize-space(text())='{label}']")
+                if el:
+                    # Value is typically the next sibling paragraph/link
+                    parent = el.evaluate_handle('node => node.parentElement')
+                    val = None
+                    if parent:
+                        try:
+                            val_node = el.query_selector("xpath=following-sibling::*[1]") or parent.query_selector("a, p, span")
+                            if val_node:
+                                val = val_node.inner_text()
+                        except Exception:
+                            pass
+                    if val:
+                        rows.append((label, val.strip()))
+            except Exception:
+                continue
+        if rows:
+            html_rows = "".join([f"<tr><th style=\"text-align:left\">{l}</th><td>{v}</td></tr>" for l, v in rows])
+            html = f"<table class=\"aps-contact-card\" style=\"margin-top:12px;border-collapse:collapse;\">{html_rows}</table>"
+            plain = "\n".join([f"{l}: {v}" for l, v in rows])
+            return html, plain
+        return '', ''
+
+    def extract_contact_card_website(self, page):
+        """Return the website URL found inside the contact card's 'Website' field, if any."""
+        # Try to locate the compact contact card container first
+        selectors = [
+            "div:has-text('Vacancy Number'):has-text('Contact')",
+            "section:has-text('Vacancy Number'):has-text('Contact')",
+            "article:has-text('Vacancy Number'):has-text('Contact')",
+        ]
+        def good(u):
+            if not u:
+                return False
+            ul = u.lower()
+            return u.startswith('http') and 'apsjobs.gov.au' not in ul and 'mpc.gov.au' not in ul
+        for sel in selectors:
+            try:
+                nodes = page.query_selector_all(sel)
+                for n in nodes or []:
+                    text = (n.inner_text() or '').lower()
+                    if 'website' not in text:
+                        continue
+                    # Find the anchor near the 'Website' label inside this node
+                    try:
+                        label = n.query_selector("xpath=.//*[self::p or self::div or self::span][contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'website')]")
+                        if label:
+                            link = label.query_selector("xpath=following::a[1]") or n.query_selector('a[href]')
+                        else:
+                            link = n.query_selector('a[href]')
+                        if link:
+                            href = link.get_attribute('href') or ''
+                            if good(href):
+                                return href
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        # Fallback: scan any 'Website' label on page but prefer contact card proximity
+        try:
+            label = page.query_selector("xpath=//*[self::p or self::div or self::span][normalize-space(text())='Website']")
+            if label:
+                link = label.query_selector("xpath=following::a[1]")
+                if link:
+                    href = link.get_attribute('href') or ''
+                    if good(href):
+                        return href
+        except Exception:
+            pass
+        return None
+
+    def extract_posted_and_closing_dates(self, page):
+        """Extract posted date and closing date from the detail page.
+
+        Returns tuple: (posted_date_date_or_none, closing_date_text_or_none)
+        """
+        try:
+            body_text = page.inner_text('body')
+        except Exception:
+            body_text = ''
+
+        posted_date = None
+        closing_text = None
+
+        # Posted: dd/mm/yyyy
+        try:
+            m = re.search(r"Posted\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", body_text, re.IGNORECASE)
+            if m:
+                posted_date = self.parse_date(m.group(1))
+        except Exception:
+            pass
+
+        # Alternate posted patterns
+        if not posted_date:
+            try:
+                m = re.search(r"Posted\s*on\s*([\d]{1,2}\s+[A-Za-z]+\s+[\d]{4})", body_text, re.IGNORECASE)
+                if m:
+                    posted_date = self.parse_date(m.group(1))
+            except Exception:
+                pass
+
+        # Closing date patterns
+        try:
+            # Explicit label
+            m = re.search(r"Closing\s*Date\s*:?\s*([\d]{1,2}/[\d]{1,2}/[\d]{4})", body_text, re.IGNORECASE)
+            if m:
+                closing_text = m.group(1)
+        except Exception:
+            pass
+
+        if not closing_text:
+            try:
+                m = re.search(r"closing date for applications is\s*([\d]{1,2}\s+[A-Za-z]+\s+[\d]{4})", body_text, re.IGNORECASE)
+                if m:
+                    closing_text = m.group(1)
+            except Exception:
+                pass
+
+        return posted_date, closing_text
+
+    def extract_company_website(self, page, company_name: str = ""):
+        """Extract a company website URL from the detail page.
+
+        Priority:
+        1) Link contained within a block that has the label 'Website'
+        2) Link whose text contains company name tokens
+        3) First external link that isn't clearly an apply/portal/recruitment URL
+        """
+        def is_bad_candidate(url: str, text: str) -> bool:
+            text_l = (text or '').lower()
+            url_l = (url or '').lower()
+            bad_words = ['apply', 'portal', 'candidate', 'recruit', 'login']
+            if any(w in text_l for w in bad_words):
+                return True
+            if any(w in url_l for w in bad_words):
+                return True
+            return False
+
+        try:
+            # 1) Look for a container that includes the label 'Website' and grab the first link inside
+            label_nodes = page.query_selector_all("xpath=//*[self::p or self::div or self::span][contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'website')]")
+            for node in label_nodes:
+                try:
+                    container = node
+                    # Prefer nearest block-level container relative to the node
+                    try:
+                        ancestor_div = node.query_selector("xpath=ancestor::div[1]")
+                        if ancestor_div:
+                            container = ancestor_div
+                    except Exception:
+                        pass
+                    link = container.query_selector("a[href]") if container else None
+                    if link:
+                        href = link.get_attribute('href') or ''
+                        text = (link.inner_text() or '')
+                        if href.startswith('http') and 'apsjobs.gov.au' not in href and 'mpc.gov.au' not in href.lower() and not is_bad_candidate(href, text):
+                            return href
+                except Exception:
+                    continue
+
+            # 2) Prefer links that reference the company name
+            tokens = [t for t in re.split(r"\W+", (company_name or '').lower()) if len(t) > 3]
+            if tokens:
+                for link in page.query_selector_all('a[href]'):
+                    try:
+                        href = link.get_attribute('href') or ''
+                        text = (link.inner_text() or '').lower()
+                        if href.startswith('http') and 'apsjobs.gov.au' not in href and 'mpc.gov.au' not in href.lower() and not is_bad_candidate(href, text):
+                            if any(tok in text for tok in tokens):
+                                return href
+                    except Exception:
+                        continue
+
+            # 3) Fallback: first reasonable external link
+            for link in page.query_selector_all('a[href]'):
+                try:
+                    href = link.get_attribute('href') or ''
+                    text = (link.inner_text() or '')
+                    if href.startswith('http') and 'apsjobs.gov.au' not in href and 'mpc.gov.au' not in href.lower() and not is_bad_candidate(href, text):
+                        return href
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _should_update_company_website(self, current_url: str, new_url: str, company_name: str) -> bool:
+        """Conservatively decide whether to update an existing company website."""
+        if not new_url:
+            return False
+        if not current_url:
+            return True
+        current_l = current_url.lower()
+        # Update if the current looks like a portal/recruitment rather than a website
+        portal_words = ['portal', 'apply', 'recruit', 'candidate', 'login']
+        if any(w in current_l for w in portal_words) or 'mpc.gov.au' in current_l:
+            return True
+        # Prefer a site whose text includes company tokens
+        tokens = [t for t in re.split(r"\W+", (company_name or '').lower()) if len(t) > 3]
+        try:
+            from urllib.parse import urlparse
+            new_host = (urlparse(new_url).netloc or '').lower()
+            if tokens and any(tok in new_host for tok in tokens):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def extract_skills_from_text(self, text):
+        """Generate skills and preferred skills from description text.
+
+        Strategy:
+        - Detect known skills/technologies from a curated list
+        - Pull phrases after patterns like 'experience in/with/on', 'skills in', 'knowledge of'
+        - Parse bullet lists for nouns/tech keywords
+        Returns tuple of comma-separated strings: (skills, preferred_skills)
+        """
+        if not text:
+            return '', ''
+
+        content = text.lower()
+
+        base_skills = [
+            'jira', 'confluence', 'azure', 'aws', 'sql', 'mysql', 'postgresql', 'python', 'java', 'javascript', 'typescript',
+            'playwright', 'selenium', 'cypress', 'pytest', 'unittest', 'rest', 'soap', 'postman', 'swagger',
+            'test automation', 'api testing', 'manual testing', 'unit testing', 'integration testing', 'uat',
+            'crm dynamics 365', 'microsoft dynamics', 'dynamics 365', 'sharepoint', 'power bi', 'excel', 'git', 'github',
+            'gitlab', 'bitbucket', 'ci/cd', 'jenkins', 'azure devops', 'docker', 'kubernetes', 'linux', 'windows',
+            'agile', 'scrum', 'kanban', 'quality assurance', 'test plans', 'test cases', 'defect management', 'jira xray'
+        ]
+
+        found = []
+        for skill in base_skills:
+            pattern = r'\b' + re.escape(skill) + r'\b'
+            if re.search(pattern, content):
+                found.append(skill)
+
+        # Extract additional phrases after experience/skills patterns
+        phrase_patterns = [
+            r'experience\s+(?:in|with|using|on)\s+([a-z0-9 .\-/&]+?)(?:\.|;|,|\n|\r)',
+            r'skills?\s+(?:in|with)\s+([a-z0-9 .\-/&]+?)(?:\.|;|,|\n|\r)',
+            r'knowledge\s+of\s+([a-z0-9 .\-/&]+?)(?:\.|;|,|\n|\r)'
+        ]
+        for patt in phrase_patterns:
+            for m in re.finditer(patt, content):
+                chunk = m.group(1)
+                # Check for embedded known skills
+                for skill in base_skills:
+                    if re.search(r'\b' + re.escape(skill) + r'\b', chunk):
+                        found.append(skill)
+
+        # Parse bullet lists
+        for bullet in re.findall(r'\n\s*[•\-*]\s*(.+)', text, flags=re.IGNORECASE):
+            bl = bullet.lower()
+            for skill in base_skills:
+                if re.search(r'\b' + re.escape(skill) + r'\b', bl):
+                    found.append(skill)
+
+        # Preferred section heuristics
+        preferred_markers = ['desirable', 'preferred', 'ideally', 'nice to have']
+        preferred_found = []
+        for marker in preferred_markers:
+            for m in re.finditer(marker + r'.{0,220}', content):
+                window = m.group(0)
+                for skill in base_skills:
+                    if re.search(r'\b' + re.escape(skill) + r'\b', window):
+                        preferred_found.append(skill)
+
+        # Ensure preferred are subset of all skills
+        if preferred_found:
+            all_skills = list({*found, *preferred_found})
+        else:
+            all_skills = found
+
+        skills_str = ", ".join(sorted(set(all_skills)))[:200]
+        preferred_str = ", ".join(sorted(set(preferred_found)))[:200]
+        return skills_str, preferred_str
 
     def extract_job_links_from_page(self, page):
         """Extract job links from current page."""
@@ -1084,6 +1500,7 @@ class APSJobsAustraliaScraper:
 
     def extract_location(self, page):
         """Extract location with government-specific patterns."""
+        # First try direct location selectors from the detail page
         location_selectors = [
             # APS Jobs specific footer structure
             ".job_listing__card--footer div:has(p.content__label.content__text--quiet:contains('Location')) p:not(.content__label)",
@@ -1102,9 +1519,7 @@ class APSJobsAustraliaScraper:
                 element = page.query_selector(selector)
                 if element:
                     text = element.inner_text().strip()
-                    # Clean up location text
-                    text = re.sub(r'\s*,?\s*(Australia|NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\s*$', '', text, flags=re.IGNORECASE)
-                    text = text.strip()
+                    # Don't over-clean location text - preserve state info
                     if text and text.lower() not in ['location', 'opportunity type']:
                         return text
             except Exception:
@@ -1118,9 +1533,41 @@ class APSJobsAustraliaScraper:
                 if label and 'location' in label.inner_text().lower():
                     location_p = div.query_selector('p:not(.content__label)')
                     if location_p:
-                        return location_p.inner_text().strip()
+                        location_text = location_p.inner_text().strip()
+                        if location_text:
+                            return location_text
         except Exception:
             pass
+        
+        # Broader search in page content for location patterns
+        try:
+            body_text = page.inner_text('body')
+            location_patterns = [
+                # Multiple locations pattern from the screenshot
+                r'(Adelaide\s+SA,\s+Brisbane\s+QLD,\s+Canberra\s+ACT,\s+Darwin\s+NT,\s+Hobart\s+TAS,\s+Melbourne\s+VIC,\s+Perth\s+WA,\s+Sydney\s+NSW,\s+Townsville\s+QLD)',
+                # Single locations with state
+                r'(Adelaide\s+SA|Brisbane\s+QLD|Canberra\s+ACT|Darwin\s+NT|Hobart\s+TAS|Melbourne\s+VIC|Perth\s+WA|Sydney\s+NSW|Townsville\s+QLD)',
+                # Cities without state abbreviations
+                r'(Adelaide|Brisbane|Canberra|Darwin|Hobart|Melbourne|Perth|Sydney|Townsville)',
+                # Any city with state pattern
+                r'([A-Z][a-z]+\s+(?:NSW|VIC|QLD|SA|WA|TAS|NT|ACT))',
+                # Multiple location indicators
+                r'(Multiple\s+locations?|Various\s+locations?|Multiple\s+states?|All\s+states?)',
+                # Generic patterns
+                r'Location:\s*([^\n\r]+)',
+                r'Located:\s*([^\n\r]+)'
+            ]
+            
+            for pattern in location_patterns:
+                match = re.search(pattern, body_text, re.IGNORECASE)
+                if match:
+                    location = match.group(1).strip()
+                    # Basic validation - must be meaningful location text
+                    if len(location) > 2 and location.lower() not in ['location', 'opportunity type', 'not specified']:
+                        return location
+                        
+        except Exception as e:
+            logger.debug(f"Error in page content location extraction: {e}")
         
         return None  # Don't use static fallback
 
@@ -1519,11 +1966,65 @@ class APSJobsAustraliaScraper:
         def _save_job_sync():
             try:
                 with transaction.atomic():
-                    # Check for duplicates (silently skip without warning)
-                    if JobPosting.objects.filter(external_url=job_data['external_url']).exists():
-                        logger.debug(f"Duplicate job found, skipping: {job_data['external_url']}")
+                    # If job exists, update key fields instead of skipping
+                    existing = JobPosting.objects.filter(external_url=job_data['external_url']).select_related('company').first()
+                    if existing:
+                        changed_fields = []
+                        # Prefer richer/longer description (HTML allowed)
+                        try:
+                            new_desc = job_data.get('description')
+                            if new_desc and (not existing.description or len(new_desc) > len(existing.description or '')):
+                                existing.description = new_desc
+                                changed_fields.append('description')
+                        except Exception:
+                            pass
+
+                        # Posted and closing dates
+                        if job_data.get('posted_date') and not existing.date_posted:
+                            existing.date_posted = job_data.get('posted_date')
+                            changed_fields.append('date_posted')
+                        if job_data.get('job_closing_date') and job_data.get('job_closing_date') != existing.job_closing_date:
+                            existing.job_closing_date = job_data.get('job_closing_date')
+                            changed_fields.append('job_closing_date')
+
+                        # Skills
+                        if job_data.get('skills') and (not existing.skills or len(job_data['skills']) > len(existing.skills or '')):
+                            existing.skills = job_data['skills']
+                            changed_fields.append('skills')
+                        if job_data.get('preferred_skills') and (not existing.preferred_skills or len(job_data['preferred_skills']) > len(existing.preferred_skills or '')):
+                            existing.preferred_skills = job_data['preferred_skills']
+                            changed_fields.append('preferred_skills')
+
+                        # Salary raw text if empty
+                        if job_data.get('salary_text') and not existing.salary_raw_text:
+                            existing.salary_raw_text = job_data['salary_text']
+                            changed_fields.append('salary_raw_text')
+
+                        # Tags/keywords
+                        if job_data.get('keywords'):
+                            new_tags = ','.join(job_data['keywords'])
+                            if not existing.tags or len(new_tags) > len(existing.tags or ''):
+                                existing.tags = new_tags
+                                changed_fields.append('tags')
+
+                        # Additional info merge
+                        try:
+                            if job_data.get('additional_info'):
+                                merged = dict(existing.additional_info or {})
+                                merged.update(job_data['additional_info'])
+                                existing.additional_info = merged
+                                changed_fields.append('additional_info')
+                        except Exception:
+                            pass
+
+                        if changed_fields:
+                            existing.save(update_fields=list(set(changed_fields + ['updated_at'])))
+                            logger.debug(f"Updated existing job with fields: {changed_fields}")
+                        
+                        # Per requirement: do not update company website for existing records
+
                         self.stats['duplicates_skipped'] += 1
-                        return "duplicate"
+                        return "updated"
                     
                     # Get or create related objects
                     company = self.get_or_create_company(job_data['company_name'])
@@ -1552,9 +2053,14 @@ class APSJobsAustraliaScraper:
                         external_url=job_data['external_url'],
                         status='active',
                         date_posted=job_data.get('posted_date'),
+                        job_closing_date=job_data.get('job_closing_date'),
+                        skills=job_data.get('skills') or '',
+                        preferred_skills=job_data.get('preferred_skills') or '',
                         tags=','.join(job_data['keywords']),
                         additional_info=job_data['additional_info']
                     )
+
+                    # Per requirement: do not update company website on create
                     
                     logger.info(f"[SUCCESS] Saved job: {job_posting.title} at {company.name}")
                     self.stats['successfully_scraped'] += 1
@@ -1615,17 +2121,43 @@ class APSJobsAustraliaScraper:
                         # Extract description from detail page (HYBRID APPROACH)
                         if job_data['external_url']:
                             try:
-                                description = self.extract_description_from_detail_page(page, job_data['external_url'])
-                                job_data['description'] = description
+                                # Get both HTML and text
+                                desc = self.extract_description_html_and_text(page, job_data['external_url'])
+                                job_data['description'] = desc.get('html') or desc.get('text')
+                                # Dates
+                                posted_date, closing_text = self.extract_posted_and_closing_dates(page)
+                                job_data['posted_date'] = posted_date
+                                job_data['job_closing_date'] = closing_text
+                                # Enhanced location extraction from detail page
+                                detail_location = self.extract_location(page)
+                                if detail_location and detail_location.lower() != 'not specified':
+                                    job_data['location'] = detail_location
+                                    logger.info(f"  [LOCATION] Updated location from detail page: {detail_location}")
+                                # Company website: per requirement, do not scrape or store website
+                                job_data['company_website'] = None
+                                # Skills from text
+                                skills, preferred = self.extract_skills_from_text(desc.get('text'))
+                                job_data['skills'] = skills
+                                job_data['preferred_skills'] = preferred
                                 
                                 # Update keywords now that we have description
-                                keywords = JobCategorizationService.get_job_keywords(job_data['title'], description)
+                                keywords = JobCategorizationService.get_job_keywords(job_data['title'], desc.get('text'))
                                 job_data['keywords'] = keywords[:10]  # Limit to 10 keywords
+                                # Ensure skills/preferred populated even if extractor found none
+                                if not job_data['skills'] and keywords:
+                                    job_data['skills'] = ", ".join(sorted(set(keywords)))[:200]
+                                if not job_data['preferred_skills'] and job_data['skills']:
+                                    job_data['preferred_skills'] = ", ".join(job_data['skills'].split(', ')[:5])
                                 
-                                logger.info(f"  [DESCRIPTION] Added description ({len(description)} chars)")
+                                logger.info(f"  [DESCRIPTION] Added description HTML/text")
                             except Exception as e:
                                 logger.warning(f"  [DESCRIPTION] Failed to get description: {e}")
                                 job_data['description'] = f"Job posted on apsjobs.gov.au - {job_data['title']}"
+                                # Fallback skills from title keywords
+                                kw = JobCategorizationService.get_job_keywords(job_data['title'], '')
+                                if kw:
+                                    job_data['skills'] = ", ".join(sorted(set(kw)))[:200]
+                                    job_data['preferred_skills'] = ", ".join(job_data['skills'].split(', ')[:5])
                         
                         # Save to database
                         save_result = self.save_job_to_database(job_data)
@@ -1635,9 +2167,12 @@ class APSJobsAustraliaScraper:
                             logger.info(f"  [LOCATION] Location: {job_data['location']}")
                             logger.info(f"  [COMPANY] Department: {job_data['company_name']}")
                             logger.info(f"  [SALARY] Salary: {job_data['salary_text'] or 'Not specified'}")
-                        elif save_result == "duplicate":
+                        elif save_result in ("duplicate", "updated"):
                             processed_count += 1  # Count duplicates as processed to avoid warnings
-                            logger.debug(f"  [DUPLICATE] Skipped duplicate job: {job_data['title']}")
+                            if save_result == "updated":
+                                logger.info(f"  [UPDATED] Refreshed existing job: {job_data['title']}")
+                            else:
+                                logger.debug(f"  [DUPLICATE] Skipped duplicate job: {job_data['title']}")
                         else:
                             logger.warning(f"  [ERROR] Failed to save job: {job_data['title']}")
                     else:

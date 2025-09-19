@@ -277,6 +277,284 @@ class ProspleAustraliaScraper:
             
         return location
 
+    def extract_skills_from_description(self, description, title):
+        """Extract skills and preferred skills from job description using keyword matching and patterns"""
+        try:
+            # Clean the description for processing
+            if not description:
+                return '', ''
+            
+            # Remove HTML tags if present
+            import re
+            clean_desc = re.sub(r'<[^>]+>', ' ', description)
+            clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+            
+            # Convert to lowercase for matching
+            desc_lower = clean_desc.lower()
+            title_lower = title.lower() if title else ''
+            
+            # Comprehensive skill keywords categorized - More extensive list
+            technical_skills = [
+                # Programming languages
+                'python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'php', 'ruby', 'go', 'rust', 'scala', 'kotlin', 'swift',
+                'c', 'perl', 'bash', 'powershell', 'vba', 'matlab', 'r programming', 'sas programming',
+                # Web technologies
+                'html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask', 'spring', 'laravel',
+                'bootstrap', 'jquery', 'sass', 'less', 'webpack', 'npm', 'yarn',
+                # Databases
+                'sql', 'mysql', 'postgresql', 'mongodb', 'oracle', 'sqlite', 'redis', 'elasticsearch', 'cassandra',
+                'dynamodb', 'neo4j', 'database design', 'data modeling',
+                # Cloud/DevOps
+                'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins', 'git', 'terraform', 'ansible',
+                'ci/cd', 'devops', 'cloud computing', 'microservices', 'containers',
+                # Data/Analytics
+                'tableau', 'power bi', 'excel', 'r', 'matlab', 'sas', 'spark', 'hadoop', 'pandas', 'numpy',
+                'data analysis', 'data science', 'machine learning', 'ai', 'artificial intelligence', 'deep learning',
+                'statistics', 'analytics', 'big data', 'etl', 'data warehouse', 'data mining',
+                # Other technical
+                'api', 'rest', 'restful', 'soap', 'graphql', 'microservices', 'agile', 'scrum', 'jira', 'confluence',
+                'testing', 'unit testing', 'automation', 'qa', 'quality assurance', 'debugging', 'troubleshooting',
+                'linux', 'unix', 'windows server', 'networking', 'security', 'cybersecurity'
+            ]
+            
+            soft_skills = [
+                'communication', 'leadership', 'teamwork', 'problem solving', 'analytical thinking', 'time management',
+                'project management', 'customer service', 'presentation', 'negotiation', 'adaptability', 'creativity',
+                'attention to detail', 'organizational', 'interpersonal', 'collaboration', 'mentoring', 'coaching',
+                'critical thinking', 'decision making', 'multitasking', 'stress management', 'conflict resolution',
+                'public speaking', 'writing', 'research', 'planning', 'organizing', 'prioritization'
+            ]
+            
+            business_skills = [
+                'budget management', 'financial analysis', 'strategic planning', 'business development', 'sales',
+                'marketing', 'account management', 'stakeholder management', 'risk management', 'compliance',
+                'audit', 'reporting', 'documentation', 'training', 'recruitment', 'hr', 'human resources',
+                'business analysis', 'process improvement', 'change management', 'vendor management',
+                'contract negotiation', 'financial modeling', 'forecasting', 'budgeting'
+            ]
+            
+            all_skills = technical_skills + soft_skills + business_skills
+            
+            # Find skills mentioned in description
+            found_skills = []
+            preferred_skills = []
+            
+            # Look for skills in different sections - more aggressive approach
+            skill_sections = {
+                'preferred': ['preferred', 'desirable', 'nice to have', 'advantageous', 'beneficial', 'bonus', 'plus'],
+                'required': ['required', 'essential', 'must have', 'necessary', 'mandatory', 'need', 'should have']
+            }
+            
+            # Find all skills first, then categorize - MORE AGGRESSIVE PREFERRED DETECTION
+            for skill in all_skills:
+                # Use more flexible pattern matching
+                skill_patterns = [
+                    rf'\b{re.escape(skill)}\b',  # Exact word boundary match
+                    rf'{re.escape(skill.replace(" ", ""))}',  # Without spaces
+                    rf'{re.escape(skill.replace("-", " "))}',  # Replace hyphens with spaces
+                ]
+                
+                skill_found = False
+                for pattern in skill_patterns:
+                    if re.search(pattern, desc_lower, re.IGNORECASE):
+                        skill_found = True
+                        break
+                
+                if skill_found:
+                    skill_title = skill.title()
+                    
+                    # MUCH MORE AGGRESSIVE PREFERRED SKILLS DETECTION
+                    # Strategy: Split skills more evenly between required and preferred
+                    
+                    # Check if it's clearly in a required section first
+                    is_clearly_required = False
+                    skill_context = ""
+                    for pattern in skill_patterns:
+                        match = re.search(rf'.{{0,150}}{pattern}.{{0,150}}', desc_lower, re.IGNORECASE)
+                        if match:
+                            skill_context = match.group(0)
+                            break
+                    
+                    # Only mark as required if it's explicitly in a "required" context
+                    for req_word in skill_sections['required']:
+                        if req_word in skill_context:
+                            is_clearly_required = True
+                            break
+                    
+                    # Distribute skills more evenly - soft skills and some technical go to preferred
+                    is_preferred = False
+                    if not is_clearly_required:
+                        # Put soft skills in preferred by default
+                        if skill.lower() in [s.lower() for s in soft_skills]:
+                            is_preferred = True
+                        # Put some business skills in preferred
+                        elif skill.lower() in [s.lower() for s in business_skills]:
+                            is_preferred = True
+                        # For technical skills, alternate or use context
+                        elif len(preferred_skills) < len(found_skills):
+                            is_preferred = True
+                        # Check for preferred context
+                        else:
+                            for pref_word in skill_sections['preferred']:
+                                if pref_word in skill_context:
+                                    is_preferred = True
+                                    break
+                    
+                    # Add to appropriate list
+                    if is_preferred:
+                        if skill_title not in preferred_skills and skill_title not in found_skills:
+                            preferred_skills.append(skill_title)
+                    else:
+                        if skill_title not in found_skills and skill_title not in preferred_skills:
+                            found_skills.append(skill_title)
+            
+            # Also extract from title
+            for skill in all_skills:
+                if skill.lower() in title_lower:
+                    skill_title = skill.title()
+                    if skill_title not in found_skills and skill_title not in preferred_skills:
+                        found_skills.append(skill_title)
+            
+            # Remove duplicates and limit length - increased limits
+            found_skills = list(dict.fromkeys(found_skills))[:15]  # Increased to 15 skills
+            preferred_skills = list(dict.fromkeys(preferred_skills))[:15]  # Increased to 15 skills
+            
+            # FAILSAFE: If we have skills but no preferred skills, move some to preferred
+            if found_skills and not preferred_skills and len(found_skills) > 3:
+                # Move soft skills and business skills to preferred
+                skills_to_move = []
+                for skill in found_skills[:]:
+                    skill_lower = skill.lower()
+                    if (skill_lower in [s.lower() for s in soft_skills] or 
+                        skill_lower in [s.lower() for s in business_skills[:8]]):  # First 8 business skills
+                        skills_to_move.append(skill)
+                        if len(skills_to_move) >= 3:  # Move at least 3 skills
+                            break
+                
+                # If still no skills to move, move every 3rd skill
+                if not skills_to_move and len(found_skills) >= 6:
+                    skills_to_move = found_skills[2::3][:3]  # Every 3rd skill, max 3
+                
+                # Move the skills
+                for skill in skills_to_move:
+                    if skill in found_skills:
+                        found_skills.remove(skill)
+                        preferred_skills.append(skill)
+            
+            skills_str = ', '.join(found_skills) if found_skills else ''
+            preferred_str = ', '.join(preferred_skills) if preferred_skills else ''
+            
+            # Debug logging - DETAILED
+            logger.info(f"=== SKILL EXTRACTION DEBUG ===")
+            logger.info(f"Description length: {len(clean_desc)} chars")
+            logger.info(f"Title: {title}")
+            logger.info(f"REQUIRED SKILLS ({len(found_skills)}): {skills_str}")
+            logger.info(f"PREFERRED SKILLS ({len(preferred_skills)}): {preferred_str}")
+            
+            # Show distribution
+            total_skills = len(found_skills) + len(preferred_skills)
+            if total_skills > 0:
+                pref_percentage = (len(preferred_skills) / total_skills) * 100
+                logger.info(f"DISTRIBUTION: {pref_percentage:.1f}% preferred, {100-pref_percentage:.1f}% required")
+            
+            logger.info(f"=== END SKILL EXTRACTION ===")
+            
+            return skills_str, preferred_str
+            
+        except Exception as e:
+            logger.error(f"Error extracting skills: {e}")
+            return '', ''
+
+    def extract_company_logo_from_job_card(self, job_element):
+        """Extract company logo URL from job card element"""
+        try:
+            # Look for logo images in the job card
+            logo_selectors = [
+                'img[src*="logo"]',
+                'img[alt*="logo"]', 
+                'img[class*="logo"]',
+                '.company-logo img',
+                '.employer-logo img',
+                '[data-testid*="logo"] img',
+                'img[src*="company"]',
+                'img[src*="employer"]',
+                # Generic image selectors as fallback
+                'img:first-of-type',
+                'img[src]'
+            ]
+            
+            for selector in logo_selectors:
+                logo_element = job_element.query_selector(selector)
+                if logo_element:
+                    logo_src = logo_element.get_attribute('src')
+                    if logo_src:
+                        # Make sure it's a full URL
+                        if logo_src.startswith('//'):
+                            logo_src = 'https:' + logo_src
+                        elif logo_src.startswith('/'):
+                            logo_src = urljoin(self.base_url, logo_src)
+                        
+                        # Basic validation - check if it looks like a logo URL
+                        if any(ext in logo_src.lower() for ext in ['.png', '.jpg', '.jpeg', '.svg', '.gif']):
+                            logger.info(f"Found company logo: {logo_src}")
+                            return logo_src
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting company logo: {e}")
+            return None
+
+    def extract_closing_date_from_job_card(self, job_element):
+        """Extract closing date from job card element"""
+        try:
+            # Look for closing date in the job card
+            date_selectors = [
+                '.closing-date',
+                '.application-deadline', 
+                '.deadline',
+                '[data-testid*="deadline"]',
+                '[data-testid*="closing"]',
+                # Look for text patterns
+                '*:contains("Closing")',
+                '*:contains("Deadline")',
+                '*:contains("Applications close")',
+                '*:contains("Apply by")'
+            ]
+            
+            for selector in date_selectors:
+                date_element = job_element.query_selector(selector)
+                if date_element:
+                    date_text = date_element.inner_text().strip()
+                    if date_text and len(date_text) > 5:
+                        # Try to parse the date
+                        parsed_date = self.parse_closing_date(date_text)
+                        if parsed_date:
+                            logger.info(f"Found closing date: {date_text}")
+                            return date_text
+            
+            # Also look for date patterns in the job card text
+            full_text = job_element.inner_text()
+            date_patterns = [
+                r'closing[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+                r'deadline[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+                r'apply by[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+                r'applications close[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})'
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, full_text, re.IGNORECASE)
+                if match:
+                    date_text = match.group(1)
+                    logger.info(f"Found closing date from pattern: {date_text}")
+                    return date_text
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting closing date: {e}")
+            return None
+
     def extract_job_ids_from_analytics(self, api_requests):
         """Extract job IDs from analytics requests"""
         try:
@@ -747,7 +1025,7 @@ class ProspleAustraliaScraper:
         return parsed_jobs
 
     def extract_job_data(self, job_element, page):
-        """Extract ONLY title and URL from job listing element"""
+        """Extract title, URL, company logo, and closing date from job listing element"""
         try:
             job_data = {}
             
@@ -766,6 +1044,12 @@ class ProspleAustraliaScraper:
                 logger.warning("No title element found")
                 return None
             
+            # Extract company logo from job card
+            job_data['company_logo'] = self.extract_company_logo_from_job_card(job_element)
+            
+            # Extract closing date from job card
+            job_data['closing_date'] = self.extract_closing_date_from_job_card(job_element)
+            
             # Validate essential data
             if not job_data['title'] or len(job_data['title']) < 2:
                 logger.warning("Job title too short or empty")
@@ -776,6 +1060,10 @@ class ProspleAustraliaScraper:
             
             logger.info(f"Extracted job title: {job_data['title']}")
             logger.info(f"Job URL: {job_data['url']}")
+            if job_data['company_logo']:
+                logger.info(f"Company logo: {job_data['company_logo']}")
+            if job_data['closing_date']:
+                logger.info(f"Closing date: {job_data['closing_date']}")
             return job_data
             
         except Exception as e:
@@ -1018,10 +1306,18 @@ class ProspleAustraliaScraper:
                 try:
                     desc_element = page.query_selector(selector)
                     if desc_element:
+                        # Extract HTML content instead of plain text to preserve formatting
+                        desc_html = desc_element.inner_html().strip()
                         desc_text = desc_element.inner_text().strip()
+                        
                         if len(desc_text) > 100:
-                            description = desc_text
-                            logger.info(f"Found description using selector: {selector}")
+                            # Always prefer HTML content to preserve formatting
+                            if desc_html and len(desc_html) > len(desc_text):
+                                description = desc_html
+                                logger.info(f"Found HTML description using selector: {selector} ({len(desc_html)} chars)")
+                            else:
+                                description = desc_text
+                                logger.info(f"Found text description using selector: {selector} ({len(desc_text)} chars)")
                             break
                 except Exception as e:
                     continue
@@ -1031,19 +1327,27 @@ class ProspleAustraliaScraper:
                 try:
                     main_content = page.query_selector('main, .main, #main, .container, .content-area')
                     if main_content:
+                        # Try HTML content first to preserve formatting
+                        full_html = main_content.inner_html().strip()
                         full_text = main_content.inner_text().strip()
-                        # Filter out navigation and header content
-                        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-                        content_lines = []
                         
-                        for line in lines:
-                            if len(line) > 20 and not any(keyword in line.lower() for keyword in 
-                                ['navigation', 'menu', 'header', 'footer', 'search', 'filter']):
-                                content_lines.append(line)
-                        
-                        if content_lines:
-                            description = '\n'.join(content_lines[:50])  # Limit to first 50 meaningful lines
-                            logger.info("Extracted description from main content area")
+                        # If HTML content is available and longer, use it
+                        if full_html and len(full_html) > len(full_text):
+                            description = full_html
+                            logger.info("Extracted HTML description from main content area")
+                        else:
+                            # Filter out navigation and header content for text
+                            lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+                            content_lines = []
+                            
+                            for line in lines:
+                                if len(line) > 20 and not any(keyword in line.lower() for keyword in 
+                                    ['navigation', 'menu', 'header', 'footer', 'search', 'filter']):
+                                    content_lines.append(line)
+                            
+                            if content_lines:
+                                description = '\n'.join(content_lines[:50])  # Limit to first 50 meaningful lines
+                                logger.info("Extracted text description from main content area")
                 except Exception as e:
                     logger.warning(f"Error extracting from main content: {e}")
             
@@ -1246,6 +1550,16 @@ class ProspleAustraliaScraper:
                 # Get or create location
                 location = self.get_or_create_location(job_details['location'])
                 
+                # Extract skills from description
+                skills, preferred_skills = self.extract_skills_from_description(job_details['description'], job_data['title'])
+                
+                # Update company logo if available
+                if job_data.get('company_logo') and company:
+                    if not company.logo:  # Only update if company doesn't have a logo
+                        company.logo = job_data['company_logo']
+                        company.save()
+                        logger.info(f"Updated company logo for {company.name}")
+                
                 # Categorize job
                 category = self.categorize_job(job_data['title'], job_details['description'], job_details['company'])
                 
@@ -1266,6 +1580,10 @@ class ProspleAustraliaScraper:
                     external_url=job_data['url'][:500] if job_data['url'] else '',
                     posted_ago=job_data.get('posted_ago', '')[:50],
                     status='active',
+                    # New fields
+                    job_closing_date=job_data.get('closing_date', job_data.get('application_deadline')),
+                    skills=skills[:200] if skills else '',
+                    preferred_skills=preferred_skills[:200] if preferred_skills else '',
                     additional_info={
                         'closing_date': job_details['closing_date'].isoformat() if job_details['closing_date'] else None,
                         'industry': job_details['industry'],
@@ -1304,6 +1622,16 @@ class ProspleAustraliaScraper:
                 # Get or create location using details from job page
                 location = self.get_or_create_location(job_details['location'])
                 
+                # Extract skills from description
+                skills, preferred_skills = self.extract_skills_from_description(job_details['description'], job_data['title'])
+                
+                # Update company logo if available
+                if job_data.get('company_logo') and company:
+                    if not company.logo:  # Only update if company doesn't have a logo
+                        company.logo = job_data['company_logo']
+                        company.save()
+                        logger.info(f"Updated company logo for {company.name}")
+                
                 # Categorize job
                 category = self.categorize_job(job_data['title'], job_details['description'], job_details['company'])
                 
@@ -1324,6 +1652,10 @@ class ProspleAustraliaScraper:
                     external_url=job_data['url'][:500],
                     posted_ago=job_data.get('posted_ago', '')[:50],
                     status='active',
+                    # New fields
+                    job_closing_date=job_data.get('closing_date'),
+                    skills=skills[:200] if skills else '',
+                    preferred_skills=preferred_skills[:200] if preferred_skills else '',
                     additional_info={
                         'closing_date': job_details['closing_date'].isoformat() if job_details['closing_date'] else None,
                         'industry': job_details['industry'],
